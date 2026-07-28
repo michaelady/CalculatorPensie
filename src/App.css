@@ -418,6 +418,13 @@ a {
   font-weight: 500;
 }
 
+.ocr-pdf-info {
+  margin: 0.85rem 0 0;
+  color: var(--teal);
+  font-weight: 500;
+  font-size: 0.92rem;
+}
+
 .ocr-raw {
   margin-top: 1rem;
 }

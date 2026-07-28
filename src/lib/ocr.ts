@@ -24,23 +24,30 @@ export interface OcrExtraction {
   avertismente: string[]
 }
 
+const STATUS_MAP: Record<string, string> = {
+  loading_tesseract_core: 'Se încarcă motorul OCR…',
+  initializing_api: 'Inițializare…',
+  loading_language: 'Se încarcă limba română…',
+  initializing_tesseract: 'Pregătire Tesseract…',
+  recognizing_text: 'Se citește documentul…',
+}
+
+export interface DocumentOcrResult {
+  text: string
+  previewUrl: string | null
+  pageCount?: number
+  pagesProcessed?: number
+}
+
 export async function runOcr(
   file: File | Blob,
   onProgress?: (p: OcrProgress) => void,
 ): Promise<string> {
-  // Worker nou per apel ca să primim progress corect
   const worker = await createWorker('ron+eng', 1, {
     logger: (m) => {
       if (onProgress && typeof m.progress === 'number') {
-        const statusMap: Record<string, string> = {
-          loading_tesseract_core: 'Se încarcă motorul OCR…',
-          initializing_api: 'Inițializare…',
-          loading_language: 'Se încarcă limba română…',
-          initializing_tesseract: 'Pregătire Tesseract…',
-          recognizing_text: 'Se citește documentul…',
-        }
         onProgress({
-          status: statusMap[String(m.status)] ?? String(m.status ?? 'Procesare…'),
+          status: STATUS_MAP[String(m.status)] ?? String(m.status ?? 'Procesare…'),
           progress: m.progress,
         })
       }
@@ -53,6 +60,91 @@ export async function runOcr(
   } finally {
     await worker.terminate()
   }
+}
+
+/**
+ * OCR pe imagine sau PDF (inclusiv PDF-uri scanate / cu poze).
+ * Pentru PDF: randează fiecare pagină + OCR; folosește și textul încorporat dacă există.
+ */
+export async function runOcrOnDocument(
+  file: File,
+  onProgress?: (p: OcrProgress) => void,
+): Promise<DocumentOcrResult> {
+  const { isPdfUpload, renderPdfForOcr, canvasToBlob } = await import('./pdf')
+
+  if (isPdfUpload(file)) {
+    const rendered = await renderPdfForOcr(file, (status, progress) => {
+      onProgress?.({ status, progress })
+    })
+
+    const worker = await createWorker('ron+eng', 1, {
+      logger: (m) => {
+        if (m.status && onProgress && m.status !== 'recognizing text') {
+          onProgress({
+            status: STATUS_MAP[String(m.status)] ?? String(m.status),
+            progress: typeof m.progress === 'number' ? m.progress * 0.15 : 0.3,
+          })
+        }
+      },
+    })
+
+    const pageTexts: string[] = []
+    try {
+      const n = rendered.pages.length
+      for (let i = 0; i < n; i++) {
+        const page = rendered.pages[i]
+        const embedded = page.embeddedText.trim()
+
+        onProgress?.({
+          status: `OCR pagină ${page.pageNumber} din ${n}…`,
+          progress: 0.3 + (0.65 * i) / n,
+        })
+
+        // Întotdeauna OCR pe imaginea paginii — acoperă PDF-uri scanate / cu poze
+        const blob = await canvasToBlob(page.canvas)
+        const { data } = await worker.recognize(blob)
+        const ocrText = (data.text ?? '').trim()
+
+        // Combină textul digital (dacă există) cu OCR — util pentru PDF-uri mixte
+        const parts = [embedded, ocrText].filter((t) => t.length > 0)
+        const combined =
+          parts.length === 2 && embedded.length > 80 && ocrText.length < embedded.length * 0.3
+            ? embedded
+            : [...new Set(parts)].join('\n')
+
+        if (combined.trim()) {
+          pageTexts.push(`--- Pagina ${page.pageNumber} ---\n${combined.trim()}`)
+        }
+      }
+    } finally {
+      await worker.terminate()
+    }
+
+    onProgress?.({ status: 'Gata', progress: 1 })
+
+    if (pageTexts.length === 0) {
+      throw new Error(
+        'Nu am putut citi text din PDF. Încearcă un scan mai clar sau o fotografie a paginii.',
+      )
+    }
+
+    let note = ''
+    if (rendered.pageCount > rendered.pagesProcessed) {
+      note = `\n\n[Notă: au fost procesate ${rendered.pagesProcessed} din ${rendered.pageCount} pagini]`
+    }
+
+    return {
+      text: pageTexts.join('\n\n') + note,
+      previewUrl: rendered.previewUrl,
+      pageCount: rendered.pageCount,
+      pagesProcessed: rendered.pagesProcessed,
+    }
+  }
+
+  // Imagine clasică
+  const text = await runOcr(file, onProgress)
+  const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+  return { text, previewUrl }
 }
 
 const MONTH_MAP: Record<string, string> = {
