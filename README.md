@@ -9,7 +9,13 @@ Aplicație web în română pentru estimarea pensiei din sistemul public, confor
 - Încărcare foto/scan (OCR cu Tesseract.js, limba română) pentru carte de muncă / adeverințe
 - Estimare pensie brută și netă (CASS / impozit orientativ)
 
-## Pornire
+## Site public (GitHub Pages)
+
+După deploy: **https://michaelady.github.io/CalculatorPensie/**
+
+În Settings → Pages, sursa trebuie să fie **GitHub Actions** (o singură dată).
+
+## Pornire locală
 
 ```bash
 npm install
