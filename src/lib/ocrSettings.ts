@@ -55,9 +55,10 @@ export function getPdfOcrSettings(tier: DeviceTier = detectDeviceTier()): PdfOcr
       return {
         maxPages: MAX_PDF_PAGES,
         chunkPages: 4,
-        renderScale: 1.35,
-        maxCanvasEdge: 1280,
-        jpegQuality: 0.8,
+        // Scale mai mare pentru stilou pe carnet (upscale-ul din preprocess completează)
+        renderScale: 1.55,
+        maxCanvasEdge: 1400,
+        jpegQuality: 0.82,
         skipOcrIfEmbeddedChars: 100,
         tesseractLang: 'ron',
         lowMemory: true,
@@ -66,9 +67,9 @@ export function getPdfOcrSettings(tier: DeviceTier = detectDeviceTier()): PdfOcr
       return {
         maxPages: MAX_PDF_PAGES,
         chunkPages: 8,
-        renderScale: 1.7,
-        maxCanvasEdge: 1680,
-        jpegQuality: 0.86,
+        renderScale: 2.0,
+        maxCanvasEdge: 1900,
+        jpegQuality: 0.88,
         skipOcrIfEmbeddedChars: 160,
         tesseractLang: 'ron+eng',
         lowMemory: false,
@@ -77,9 +78,9 @@ export function getPdfOcrSettings(tier: DeviceTier = detectDeviceTier()): PdfOcr
       return {
         maxPages: MAX_PDF_PAGES,
         chunkPages: MAX_PDF_PAGES,
-        renderScale: 2.2,
-        maxCanvasEdge: 2200,
-        jpegQuality: 0.9,
+        renderScale: 2.5,
+        maxCanvasEdge: 2600,
+        jpegQuality: 0.92,
         skipOcrIfEmbeddedChars: 220,
         tesseractLang: 'ron+eng',
         lowMemory: false,
@@ -89,7 +90,7 @@ export function getPdfOcrSettings(tier: DeviceTier = detectDeviceTier()): PdfOcr
 
 /**
  * Decide dacă textul digital e suficient de bogat ca să sărim OCR-ul.
- * PDF-urile digitale (nu scanuri) au de obicei multe caractere + cifre/date.
+ * Nu sărim pe formulare/carnete — textul tipărit al etichetelor nu include scrisul de mână.
  */
 export function shouldSkipOcrForEmbeddedText(
   embeddedText: string,
@@ -97,6 +98,22 @@ export function shouldSkipOcrForEmbeddedText(
 ): boolean {
   const text = embeddedText.trim()
   if (text.length < settings.skipOcrIfEmbeddedChars) return false
+
+  const lower = text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+  // Carnet / formular tipărit: etichetele au multe cuvinte, dar numele e scris de mână
+  if (
+    (lower.includes('numele') && lower.includes('prenume')) ||
+    lower.includes('carnet de munca') ||
+    lower.includes('carte de munca') ||
+    lower.includes('locul nasterii') ||
+    lower.includes('locul de munca')
+  ) {
+    return false
+  }
+
   const digitCount = (text.match(/\d/g) ?? []).length
   const wordCount = text.split(/\s+/).filter(Boolean).length
   return digitCount >= 4 && wordCount >= 12

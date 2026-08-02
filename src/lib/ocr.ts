@@ -5,9 +5,17 @@ import type { Sex } from './pension'
 
 /** Evită coliziunea de tipuri cu DOM Worker din lib.dom. */
 type TessWorker = {
-  recognize: (image: File | Blob | string) => Promise<{ data: { text: string } }>
+  recognize: (
+    image: File | Blob | string | HTMLCanvasElement,
+    options?: { rectangle?: { left: number; top: number; width: number; height: number } },
+  ) => Promise<{ data: { text: string } }>
+  setParameters: (params: Record<string, string | number>) => Promise<unknown>
   terminate: () => Promise<unknown>
 }
+
+/** PSM Tesseract: 6 = bloc, 11 = text rar (formulare / scris pe puncte). */
+const PSM_BLOCK = '6'
+const PSM_SPARSE = '11'
 
 export interface OcrProgress {
   status: string
@@ -156,11 +164,24 @@ async function runOcrOnPdfFile(
         }
       },
     })
-    workerRef.current = created as unknown as TessWorker
-    return workerRef.current
+    const worker = created as unknown as TessWorker
+    try {
+      await worker.setParameters({
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+        tessedit_pageseg_mode: PSM_BLOCK,
+      })
+    } catch {
+      /* ignore */
+    }
+    workerRef.current = worker
+    return worker
   }
 
   try {
+    const { enhanceCanvasForOcr, looksLikeHandwrittenForm } = await import('./imagePreprocess')
+    const { releaseCanvas } = await import('./pdf')
+
     const meta = await processPdfPages(
       file,
       async (page) => {
@@ -180,13 +201,50 @@ async function runOcrOnPdfFile(
 
         if (!skipOcr && page.canvas) {
           const w = await ensureWorker()
-          const blob = await canvasToBlob(
-            page.canvas,
-            page.settings.jpegQuality,
-            'image/jpeg',
-          )
-          const { data } = await w.recognize(blob)
-          ocrText = (data.text ?? '').trim()
+          const handwriting =
+            looksLikeHandwrittenForm(embedded) || embedded.length < 40
+
+          let enhanced: HTMLCanvasElement | null = null
+          try {
+            enhanced = enhanceCanvasForOcr(page.canvas, {
+              upscale: handwriting ? (settings.lowMemory ? 1.35 : 1.6) : settings.lowMemory ? 1.1 : 1.25,
+              threshold: handwriting ? 170 : null,
+              lowMemory: settings.lowMemory,
+            })
+
+            // PNG păstrează muchiile stiloului mai bine decât JPEG
+            const blob = await canvasToBlob(enhanced, 0.95, 'image/png')
+            await w.setParameters({ tessedit_pageseg_mode: PSM_BLOCK }).catch(() => undefined)
+            const first = await w.recognize(blob)
+            ocrText = (first.data.text ?? '').trim()
+
+            // A doua trecere (text rar) dacă pare carnet și nu avem încă numele
+            const needsSparse =
+              handwriting ||
+              looksLikeHandwrittenForm(ocrText) ||
+              !extractPersonNameFromText(`${embedded}\n${ocrText}`)
+
+            if (needsSparse) {
+              onProgress?.({
+                status: `OCR scris de mână — pag. ${absolutePage}…`,
+                progress: mapProgress(
+                  0.1 + (0.85 * (idx + 0.5)) / Math.max(1, n),
+                  progressStart,
+                  progressEnd,
+                ),
+              })
+              await w.setParameters({ tessedit_pageseg_mode: PSM_SPARSE }).catch(() => undefined)
+              const second = await w.recognize(blob)
+              const sparseText = (second.data.text ?? '').trim()
+              if (sparseText) {
+                // Combină: păstrează ambele, fără duplicate exacte
+                ocrText = [...new Set([ocrText, sparseText].filter(Boolean))].join('\n')
+              }
+              await w.setParameters({ tessedit_pageseg_mode: PSM_BLOCK }).catch(() => undefined)
+            }
+          } finally {
+            if (enhanced && enhanced !== page.canvas) releaseCanvas(enhanced)
+          }
         }
 
         const combined = combinePageText(embedded, ocrText)
@@ -336,9 +394,12 @@ export async function runOcrOnDocument(
     }
   }
 
-  // Imagine clasică — pe low-end folosim doar română ca să reducem modelul
-  const lang = getPdfOcrSettings().tesseractLang
-  const text = await runOcrWithLang(file, lang, onProgress)
+  // Imagine clasică — preprocessare pentru scris de mână + OCR dublu pe formulare
+  const settings = getPdfOcrSettings()
+  const text = await runOcrWithLang(file, settings.tesseractLang, onProgress, {
+    handwriting: true,
+    lowMemory: settings.lowMemory,
+  })
   const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
   return { text, previewUrl, filesProcessed: 1 }
 }
@@ -434,26 +495,93 @@ export function mergeOcrExtractions(parts: OcrExtraction[]): OcrExtraction {
   return merged
 }
 
+async function loadImageToCanvas(file: File | Blob): Promise<HTMLCanvasElement> {
+  const url = URL.createObjectURL(file)
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image()
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error('Nu s-a putut încărca imaginea'))
+      el.src = url
+    })
+    const canvas = document.createElement('canvas')
+    canvas.width = img.naturalWidth || img.width
+    canvas.height = img.naturalHeight || img.height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Nu s-a putut crea canvas pentru imagine')
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.drawImage(img, 0, 0)
+    return canvas
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}
+
 async function runOcrWithLang(
   file: File | Blob,
   lang: string,
   onProgress?: (p: OcrProgress) => void,
+  opts?: { handwriting?: boolean; lowMemory?: boolean },
 ): Promise<string> {
-  const worker = await createWorker(lang, 1, {
+  const worker = (await createWorker(lang, 1, {
     logger: (m) => {
       if (onProgress && typeof m.progress === 'number') {
         onProgress({
           status: STATUS_MAP[String(m.status)] ?? String(m.status ?? 'Procesare…'),
-          progress: m.progress,
+          progress: m.progress * (opts?.handwriting ? 0.55 : 1),
         })
       }
     },
-  })
+  })) as unknown as TessWorker
 
+  let enhanced: HTMLCanvasElement | null = null
   try {
-    const { data } = await worker.recognize(file)
-    return data.text ?? ''
+    await worker.setParameters({
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+      tessedit_pageseg_mode: PSM_BLOCK,
+    }).catch(() => undefined)
+
+    let source: File | Blob | HTMLCanvasElement = file
+    if (opts?.handwriting) {
+      try {
+        const { enhanceCanvasForOcr } = await import('./imagePreprocess')
+        const { releaseCanvas } = await import('./pdf')
+        const base = await loadImageToCanvas(file)
+        enhanced = enhanceCanvasForOcr(base, {
+          upscale: opts.lowMemory ? 1.35 : 1.6,
+          threshold: 170,
+          lowMemory: opts.lowMemory,
+        })
+        releaseCanvas(base)
+        source = enhanced
+      } catch {
+        source = file
+      }
+    }
+
+    const first = await worker.recognize(source)
+    let text = (first.data.text ?? '').trim()
+
+    if (opts?.handwriting) {
+      onProgress?.({ status: 'OCR scris de mână (trecere 2)…', progress: 0.7 })
+      await worker.setParameters({ tessedit_pageseg_mode: PSM_SPARSE }).catch(() => undefined)
+      const second = await worker.recognize(source)
+      const sparse = (second.data.text ?? '').trim()
+      if (sparse) text = [...new Set([text, sparse].filter(Boolean))].join('\n')
+    }
+
+    return text
   } finally {
+    if (enhanced) {
+      try {
+        const { releaseCanvas } = await import('./pdf')
+        releaseCanvas(enhanced)
+      } catch {
+        /* ignore */
+      }
+    }
     await worker.terminate()
   }
 }
