@@ -49,7 +49,7 @@ export function decodeCnp(cnp: string): CnpDecoded | null {
 export function extractCnpFromText(text: string): CnpDecoded | null {
   const labeled = [
     ...text.matchAll(
-      /(?:\bCNP\b|\bC\.?\s*N\.?\s*P\.?\b|cod(?:ul)?\s+numeric\s+personal)\s*[:\-]?\s*([1-8][\d ]{12,16})/gi,
+      /(?:\bCNP\b|\bC\.?\s*N\.?\s*P\.?\b|cod(?:ul)?\s+numeric\s+personal)\s*[:-]?\s*([1-8][\d ]{12,16})/gi,
     ),
   ]
   for (const m of labeled) {
