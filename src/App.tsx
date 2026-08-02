@@ -13,7 +13,14 @@ import {
 } from './lib/pension'
 import './App.css'
 
-const initial: PensionInput = {
+interface FormState extends PensionInput {
+  nume: string
+  cnp: string
+}
+
+const initial: FormState = {
+  nume: '',
+  cnp: '',
   sex: 'M',
   dataNasterii: '1970-01-15',
   stagiuCotizareAni: 30,
@@ -26,20 +33,27 @@ const initial: PensionInput = {
 }
 
 export default function App() {
-  const [form, setForm] = useState<PensionInput>(initial)
+  const [form, setForm] = useState<FormState>(initial)
   const [usePunctaj, setUsePunctaj] = useState(false)
   const [ocrNotes, setOcrNotes] = useState<OcrExtraction | null>(null)
   const [submitted, setSubmitted] = useState(false)
 
   const result = useMemo(() => {
     const input: PensionInput = {
-      ...form,
+      sex: form.sex,
+      dataNasterii: form.dataNasterii,
+      stagiuCotizareAni: form.stagiuCotizareAni,
+      stagiuCotizareLuni: form.stagiuCotizareLuni,
+      salariuBrutMediu: form.salariuBrutMediu,
       punctajAnualMediu: usePunctaj ? form.punctajAnualMediu : null,
+      asimilate: form.asimilate,
+      salariuMediuEconomie: form.salariuMediuEconomie,
+      vpr: form.vpr,
     }
     return calculeazaPensie(input)
   }, [form, usePunctaj])
 
-  const patch = <K extends keyof PensionInput>(key: K, value: PensionInput[K]) => {
+  const patch = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((f) => ({ ...f, [key]: value }))
     setSubmitted(true)
   }
@@ -56,6 +70,10 @@ export default function App() {
     setOcrNotes(data)
     setForm((f) => ({
       ...f,
+      nume: data.nume?.trim() ? data.nume.trim() : f.nume,
+      cnp: data.cnp?.trim() ? data.cnp.trim() : f.cnp,
+      sex: data.sex ?? f.sex,
+      dataNasterii: data.dataNasterii ?? f.dataNasterii,
       stagiuCotizareAni:
         data.stagiuEstimatAni > 0 ? data.stagiuEstimatAni : f.stagiuCotizareAni,
       stagiuCotizareLuni:
@@ -65,6 +83,10 @@ export default function App() {
       salariuBrutMediu: data.salariuMediuEstimat ?? f.salariuBrutMediu,
     }))
     setSubmitted(true)
+    // Adu în vedere formularul actualizat
+    requestAnimationFrame(() => {
+      document.getElementById('calculator')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
   }
 
   return (
@@ -92,10 +114,33 @@ export default function App() {
         <section className="panel form-panel" aria-labelledby="date-title">
           <div className="panel-head">
             <h2 id="date-title">Datele tale</h2>
-            <p>Toate câmpurile influențează estimarea. Valorile pot fi ajustate oricând.</p>
+            <p>
+              După scanarea documentelor, câmpurile se completează automat cu valorile extrase
+              (inclusiv nume și CNP). Verifică-le înainte de calcul.
+            </p>
           </div>
 
           <div className="form-grid">
+            <TextField
+              label="Nume și prenume"
+              value={form.nume}
+              onChange={(v) => patch('nume', v)}
+              placeholder="ex. Popescu Ion"
+              autoComplete="name"
+              hint="Se completează din cartea de muncă / Revisal dacă e detectat"
+            />
+
+            <TextField
+              label="CNP"
+              value={form.cnp}
+              onChange={(v) => patch('cnp', v.replace(/\D/g, '').slice(0, 13))}
+              placeholder="13 cifre"
+              inputMode="numeric"
+              autoComplete="off"
+              maxLength={13}
+              hint="Din CNP se pot deduce sexul și data nașterii"
+            />
+
             <SelectField
               label="Sex"
               value={form.sex}
@@ -253,6 +298,12 @@ export default function App() {
               <h2 id="ocr-notes-title">Rezultat scanare</h2>
               <p>Am completat formularul cu valorile detectate. Verifică și corectează.</p>
             </div>
+            {(ocrNotes.nume || ocrNotes.cnp) && (
+              <ul className="note-list ok">
+                {ocrNotes.nume ? <li>Nume: {ocrNotes.nume}</li> : null}
+                {ocrNotes.cnp ? <li>CNP: {ocrNotes.cnp}</li> : null}
+              </ul>
+            )}
             {ocrNotes.indiciiGasiti.length > 0 ? (
               <ul className="note-list ok">
                 {ocrNotes.indiciiGasiti.map((n) => (

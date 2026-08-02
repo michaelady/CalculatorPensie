@@ -1,5 +1,7 @@
 import { createWorker } from 'tesseract.js'
+import { extractCnpFromText, extractPersonNameFromText } from './cnp'
 import { getPdfOcrSettings } from './ocrSettings'
+import type { Sex } from './pension'
 
 /** Evită coliziunea de tipuri cu DOM Worker din lib.dom. */
 type TessWorker = {
@@ -27,6 +29,14 @@ export interface OcrExtraction {
   stagiuEstimatAni: number
   stagiuEstimatLuni: number
   salariuMediuEstimat: number | null
+  /** Nume și prenume detectate în document */
+  nume?: string
+  /** CNP (13 cifre) dacă e valid */
+  cnp?: string
+  /** Sex dedus din CNP, dacă e disponibil */
+  sex?: Sex
+  /** Data nașterii (YYYY-MM-DD) din CNP sau document */
+  dataNasterii?: string
   indiciiGasiti: string[]
   avertismente: string[]
 }
@@ -532,7 +542,7 @@ function monthsBetween(start: string, end: string): number {
 }
 
 /**
- * Extrage din text OCR indicii despre angajări, stagiu și salarii.
+ * Extrage din text OCR indicii despre angajări, stagiu, salarii, nume și CNP.
  * Cartea de muncă variază ca format — rezultatul e o estimare de completat manual.
  */
 export function parseEmploymentDocument(text: string): OcrExtraction {
@@ -548,6 +558,19 @@ export function parseEmploymentDocument(text: string): OcrExtraction {
 
   const dateRegex =
     /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+(?:ian|feb|mar|apr|mai|iun|iul|aug|sep|oct|noi|dec)[a-zăâîșț]*\.?\s+\d{4})/gi
+
+  // Identitate: CNP + nume
+  const cnpDecoded = extractCnpFromText(text)
+  const nume = extractPersonNameFromText(text)
+  if (cnpDecoded) {
+    indiciiGasiti.push(`CNP detectat: ${cnpDecoded.cnp}`)
+    indiciiGasiti.push(
+      `Din CNP: ${cnpDecoded.sex === 'M' ? 'bărbat' : 'femeie'}, născut(ă) ${cnpDecoded.dataNasterii}`,
+    )
+  }
+  if (nume) {
+    indiciiGasiti.push(`Nume detectat: ${nume}`)
+  }
 
   // Detect document type hints
   const lower = text.toLowerCase()
@@ -663,6 +686,12 @@ export function parseEmploymentDocument(text: string): OcrExtraction {
   if (salariuMediuEstimat) {
     indiciiGasiti.push(`Salariu mediu detectat: ${salariuMediuEstimat.toLocaleString('ro-RO')} lei`)
   }
+  if (!nume) {
+    avertismente.push('Nu am găsit numele în document — completează-l manual dacă e nevoie.')
+  }
+  if (!cnpDecoded) {
+    avertismente.push('Nu am găsit un CNP valid în document — completează-l manual dacă e nevoie.')
+  }
 
   return {
     text,
@@ -670,6 +699,10 @@ export function parseEmploymentDocument(text: string): OcrExtraction {
     stagiuEstimatAni,
     stagiuEstimatLuni,
     salariuMediuEstimat,
+    nume: nume ?? undefined,
+    cnp: cnpDecoded?.cnp,
+    sex: cnpDecoded?.sex,
+    dataNasterii: cnpDecoded?.dataNasterii,
     indiciiGasiti,
     avertismente,
   }
