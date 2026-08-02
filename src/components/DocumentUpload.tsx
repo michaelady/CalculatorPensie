@@ -151,8 +151,10 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
         <p className="dropzone-title">Trage fișierele aici sau alege din dispozitiv</p>
         <p className="dropzone-meta">
           JPG, PNG, WEBP, PDF (text, scan sau Revisal) — mai multe surse odată · max.{' '}
-          {MAX_PDF_PAGES} pagini/PDF · pe dispozitiv slab: chunk-uri de {settings.chunkPages}{' '}
-          pagini
+          {MAX_PDF_PAGES} pagini/PDF
+          {settings.chunkPages < MAX_PDF_PAGES
+            ? ` · pe dispozitiv slab: părți de ${settings.chunkPages} pagini (fișier temporar)`
+            : ''}
         </p>
 
         {selectedNames.length > 0 && !busy ? (

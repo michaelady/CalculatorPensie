@@ -178,6 +178,13 @@ export async function canvasToPreviewDataUrl(
 
 type ProgressFn = (status: string, progress: number) => void
 
+export interface ProcessPdfPagesOptions {
+  /** Prima pagină 1-based de procesat (inclusiv). */
+  fromPage?: number
+  /** Ultima pagină 1-based de procesat (inclusiv). */
+  toPage?: number
+}
+
 /**
  * Parcurge PDF-ul pagină cu pagină: extrage text → (opțional) randează →
  * apelează handler-ul → eliberează canvas-ul imediat.
@@ -188,13 +195,15 @@ export async function processPdfPages(
   onPage: (page: PdfPagePayload) => Promise<void>,
   onProgress?: ProgressFn,
   settings: PdfOcrSettings = getPdfOcrSettings(),
+  options: ProcessPdfPagesOptions = {},
 ): Promise<{ pageCount: number; pagesProcessed: number; previewUrl: string | null }> {
   if (!isPdfUpload(file)) {
     throw new Error('Fișierul nu este un PDF')
   }
 
   onProgress?.('Se încarcă PDF-ul…', 0.02)
-  const data = new Uint8Array(await file.arrayBuffer())
+  // slice() — pdf.js poate transfera/detach buffer-ul original
+  const data = new Uint8Array(await file.arrayBuffer()).slice()
   const loadingTask = getDocument({
     data,
     useSystemFonts: true,
@@ -205,14 +214,19 @@ export async function processPdfPages(
   })
   const pdf: PDFDocumentProxy = await loadingTask.promise
   const pageCount = pdf.numPages
-  const limit = Math.min(pageCount, settings.maxPages)
+  const hardLimit = Math.min(pageCount, settings.maxPages)
+  const fromPage = Math.max(1, options.fromPage ?? 1)
+  const toPage = Math.min(hardLimit, options.toPage ?? hardLimit)
+  const pagesToProcess = Math.max(0, toPage - fromPage + 1)
   let previewUrl: string | null = null
+  let processed = 0
 
   try {
-    for (let i = 1; i <= limit; i++) {
+    for (let i = fromPage; i <= toPage; i++) {
+      processed++
       onProgress?.(
-        `Se pregătește pagina ${i} din ${limit}${pageCount > limit ? ` (din ${pageCount})` : ''}…`,
-        0.05 + (0.25 * (i - 1)) / limit,
+        `Se pregătește pagina ${i} din ${hardLimit}${pageCount > hardLimit ? ` (din ${pageCount})` : ''}…`,
+        0.05 + (0.25 * (processed - 1)) / Math.max(1, pagesToProcess),
       )
 
       const page = await pdf.getPage(i)
@@ -227,15 +241,14 @@ export async function processPdfPages(
           if (!previewUrl) {
             previewUrl = await canvasToPreviewDataUrl(canvas, 0.7)
           }
-        } else if (!previewUrl) {
-          // Tot generăm un preview mic pentru prima pagină digitală
+        } else if (!previewUrl && i === fromPage) {
+          // Preview mic doar pentru prima pagină din interval
           canvas = await renderPageToCanvas(page, {
             ...settings,
             renderScale: Math.min(1.1, settings.renderScale),
             maxCanvasEdge: Math.min(900, settings.maxCanvasEdge),
           })
           previewUrl = await canvasToPreviewDataUrl(canvas, 0.65)
-          // Nu pasăm canvas-ul mai departe — OCR nu e necesar
           releaseCanvas(canvas)
           canvas = null
         }
@@ -243,7 +256,7 @@ export async function processPdfPages(
         await onPage({
           pageNumber: i,
           pageCount,
-          pagesToProcess: limit,
+          pagesToProcess: hardLimit,
           embeddedText,
           canvas,
           settings,
@@ -275,7 +288,7 @@ export async function processPdfPages(
 
   return {
     pageCount,
-    pagesProcessed: limit,
+    pagesProcessed: processed,
     previewUrl,
   }
 }

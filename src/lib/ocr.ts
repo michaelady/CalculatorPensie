@@ -97,15 +97,16 @@ function mapProgress(
 }
 
 /**
- * OCR pe un singur fișier PDF deja pregătit (chunk temporar sau PDF mic).
- * pageOffset: offset 0-based pentru numerotarea paginilor în textul final.
+ * OCR pe un fișier PDF (sau o parte din el, via fromPage/toPage).
+ * Între chunk-uri se redeschide PDF-ul ca să eliberăm memoria pdf.js.
  */
 async function runOcrOnPdfFile(
   file: File,
   settings: ReturnType<typeof getPdfOcrSettings>,
   onProgress?: (p: OcrProgress) => void,
   options?: {
-    pageOffset?: number
+    fromPage?: number
+    toPage?: number
     totalPagesHint?: number
     progressStart?: number
     progressEnd?: number
@@ -119,7 +120,6 @@ async function runOcrOnPdfFile(
     yieldToMain,
   } = await import('./pdf')
 
-  const pageOffset = options?.pageOffset ?? 0
   const progressStart = options?.progressStart ?? 0.2
   const progressEnd = options?.progressEnd ?? 1
   const pageTexts: string[] = []
@@ -156,7 +156,7 @@ async function runOcrOnPdfFile(
       async (page) => {
         const embedded = page.embeddedText.trim()
         const n = options?.totalPagesHint ?? page.pagesToProcess
-        const absolutePage = pageOffset + page.pageNumber
+        const absolutePage = page.pageNumber
         const idx = absolutePage - 1
 
         onProgress?.({
@@ -193,6 +193,10 @@ async function runOcrOnPdfFile(
         })
       },
       settings,
+      {
+        fromPage: options?.fromPage,
+        toPage: options?.toPage,
+      },
     )
 
     return {
@@ -229,14 +233,25 @@ export async function runOcrOnDocument(
     const { splitPdfToTempChunks } = await import('./pdfSplit')
     const { readTempFile, deleteTempFile, clearTempSession } = await import('./tempStorage')
 
-    const split = await splitPdfToTempChunks(file, settings, (status, progress) => {
-      onProgress?.({ status, progress: progress * 0.15 })
-    })
+    let split
+    try {
+      split = await splitPdfToTempChunks(file, settings, (status, progress) => {
+        onProgress?.({ status, progress: progress * 0.15 })
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      throw new Error(
+        msg.includes('Pages') || msg.includes('catalog')
+          ? 'PDF-ul nu a putut fi citit (format de scan atipic). Încearcă re-salvarea ca PDF sau fotografii JPG ale paginilor.'
+          : msg || 'Nu am putut deschide PDF-ul.',
+      )
+    }
 
     const pageTexts: string[] = []
     let previewUrl: string | null = null
     let pagesProcessed = 0
     const workerRef: { current: TessWorker | null } = { current: null }
+    const tempHandle = split.chunks[0]?.handle
 
     try {
       const nChunks = split.chunks.length
@@ -253,21 +268,19 @@ export async function runOcrOnDocument(
           progress: rangeStart,
         })
 
+        // Reîncărcăm din stocarea temporară la fiecare parte — eliberează memoria pdf.js
         const chunkFile = await readTempFile(chunk.handle)
-        try {
-          const part = await runOcrOnPdfFile(chunkFile, settings, onProgress, {
-            pageOffset: chunk.startPage - 1,
-            totalPagesHint: split.pagesQueued,
-            progressStart: rangeStart,
-            progressEnd: rangeEnd,
-            sharedWorker: workerRef,
-          })
-          if (part.text.trim()) pageTexts.push(part.text.trim())
-          if (!previewUrl && part.previewUrl) previewUrl = part.previewUrl
-          pagesProcessed += part.pagesProcessed ?? chunk.pageCount
-        } finally {
-          await deleteTempFile(chunk.handle)
-        }
+        const part = await runOcrOnPdfFile(chunkFile, settings, onProgress, {
+          fromPage: chunk.startPage,
+          toPage: chunk.endPage,
+          totalPagesHint: split.pagesQueued,
+          progressStart: rangeStart,
+          progressEnd: rangeEnd,
+          sharedWorker: workerRef,
+        })
+        if (part.text.trim()) pageTexts.push(part.text.trim())
+        if (!previewUrl && part.previewUrl) previewUrl = part.previewUrl
+        pagesProcessed += part.pagesProcessed ?? chunk.pageCount
       }
     } finally {
       const activeWorker = workerRef.current
@@ -275,6 +288,13 @@ export async function runOcrOnDocument(
       if (activeWorker) {
         try {
           await activeWorker.terminate()
+        } catch {
+          /* ignore */
+        }
+      }
+      if (tempHandle) {
+        try {
+          await deleteTempFile(tempHandle)
         } catch {
           /* ignore */
         }
@@ -294,7 +314,7 @@ export async function runOcrOnDocument(
     if (split.pageCount > split.pagesQueued) {
       note = `\n\n[Notă: au fost procesate ${split.pagesQueued} din ${split.pageCount} pagini (limită ${settings.maxPages})]`
     } else if (split.split) {
-      note = `\n\n[Notă: PDF împărțit în ${split.chunks.length} fișiere temporare × max. ${settings.chunkPages} pagini]`
+      note = `\n\n[Notă: PDF procesat în ${split.chunks.length} părți × max. ${settings.chunkPages} pagini (fișier temporar pe dispozitiv)]`
     }
 
     return {
