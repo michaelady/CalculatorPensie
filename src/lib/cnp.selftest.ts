@@ -45,6 +45,18 @@ assert(
   extractPersonNameFromFilename('Carte_Munca_Voinea_Mihai (1).pdf') === 'Voinea Mihai',
   'filename hint',
 )
+assert(
+  extractPersonNameFromFilename(
+    'Carte_Munca_Voinea_Mihai_transcriere_nopics_1483.pdf',
+  ) === 'Voinea Mihai',
+  'filename ignores transcriere/nopics suffix',
+)
+assert(
+  extractPersonNameFromText(
+    'Carte de Muncă — Voinea Mihai\nTitular: Voinea Mihai\nCI: Voinea Mihai, fiul lui…',
+  ) === 'Voinea Mihai',
+  'labeled Titular/CI identity',
+)
 
 // Chiar dacă OCR dă gunoi, filename salvează situația
 const garbage = extractPersonNameFromText('Lun Eee\nData nasterii 15 IAN', {

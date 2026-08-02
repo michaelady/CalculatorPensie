@@ -8,7 +8,9 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test:carnet-ocr": "tsx scripts/verify-carnet-ocr.ts && tsx src/lib/cnp.selftest.ts"
+    "test:carnet-ocr": "tsx scripts/verify-carnet-ocr.ts && tsx src/lib/cnp.selftest.ts",
+    "test:validate-pdf": "tsx scripts/validate-input-pdf.ts",
+    "test:unit": "tsx src/lib/cnp.selftest.ts && tsx src/lib/ocrSettings.selftest.ts && tsx src/lib/pension.selftest.ts"
   },
   "dependencies": {
     "pdfjs-dist": "^6.1.200",

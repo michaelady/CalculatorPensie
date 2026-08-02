@@ -139,6 +139,18 @@ const NAME_STOP = new Set([
   'noiembrie',
   'dec',
   'decembrie',
+  'transcriere',
+  'nopics',
+  'pagina',
+  'pagini',
+  'scanat',
+  'scanata',
+  'copie',
+  'final',
+  'original',
+  'document',
+  'adeverinta',
+  'adeverință',
 ])
 
 /** Corecții tipice OCR → nume românești (inclusiv stilou pe carnet). */
@@ -244,8 +256,12 @@ export function splitGluedHandwrittenName(fragment: string): string | null {
   return cleanupCapturedName(fragment)
 }
 
+const FILENAME_STOP =
+  /^(carte|carnet|munca|muncă|de|scan|foto|img|image|pdf|document|revisal|extras|transcriere|nopics|copie|copy|final|original|text|tabele|poze|pics|hand|scris)$/i
+
 /**
  * Extrage nume din numele fișierului: Carte_Munca_Voinea_Mihai (1).pdf
+ * Preferă tokenii de imediat după „carte/munca”, nu sufixe tip „transcriere_nopics”.
  */
 export function extractPersonNameFromFilename(filename: string): string | null {
   const base = filename
@@ -256,17 +272,41 @@ export function extractPersonNameFromFilename(filename: string): string | null {
     .replace(/\s+/g, ' ')
     .trim()
 
-  const tokens = base
-    .split(' ')
-    .map((t) => t.trim())
-    .filter(Boolean)
-    .filter((t) => !/^(carte|carnet|munca|muncă|de|scan|foto|img|image|pdf|document|revisal|extras)$/i.test(t))
+  const rawTokens = base.split(' ').map((t) => t.trim()).filter(Boolean)
 
+  // Carte_Munca_Voinea_Mihai_transcriere… → ia Voinea Mihai (după munca)
+  const muncaIdx = rawTokens.findIndex((t) => /^(munca|muncă|carnet)$/i.test(t))
+  if (muncaIdx >= 0) {
+    const after = rawTokens.slice(muncaIdx + 1).filter((t) => !FILENAME_STOP.test(t))
+    for (let n = Math.min(3, after.length); n >= 2; n--) {
+      const hit = cleanupCapturedName(after.slice(0, n).join(' '))
+      if (hit) return hit
+    }
+  }
+
+  const tokens = rawTokens.filter((t) => !FILENAME_STOP.test(t))
   if (tokens.length < 2) return null
-  // ia ultimele 2–3 tokeni ca nume (Voinea Mihai)
   for (let n = Math.min(3, tokens.length); n >= 2; n--) {
-    const candidate = tokens.slice(-n).join(' ')
+    const candidate = tokens.slice(0, n).join(' ')
     const hit = cleanupCapturedName(candidate)
+    if (hit) return hit
+  }
+  return null
+}
+
+/** Titular: / CI: / Carte de muncă — Nume */
+function extractLabeledIdentityName(text: string): string | null {
+  const patterns = [
+    /(?:titular(?:ul)?|beneficiar(?:ul)?)\s*[:—-]?\s*([A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț-]+(?:\s+[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț-]+){1,3})/i,
+    /\bCI\s*[:—-]\s*([A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț-]+(?:\s+[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț-]+){1,3})/i,
+    /carte\s+de\s+munc[aă]\s*[—–:-]\s*([A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț-]+(?:\s+[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț-]+){1,3})/i,
+  ]
+  for (const p of patterns) {
+    const m = text.match(p)
+    if (!m) continue
+    // taie la virgulă / „fiul”
+    const raw = m[1].split(/,|\bfiul\b|\bfiica\b/i)[0]
+    const hit = cleanupCapturedName(raw)
     if (hit) return hit
   }
   return null
@@ -352,6 +392,11 @@ export function extractPersonNameFromText(
 ): string | null {
   const candidates: { name: string; score: number }[] = []
 
+  const fromIdentity = extractLabeledIdentityName(text)
+  if (fromIdentity) {
+    candidates.push({ name: fromIdentity, score: scoreNameCandidate(fromIdentity, 'label') + 4 })
+  }
+
   const fromCarnet = extractNameAfterCarnetLabel(text)
   if (fromCarnet) candidates.push({ name: fromCarnet, score: scoreNameCandidate(fromCarnet, 'label') })
 
@@ -363,7 +408,6 @@ export function extractPersonNameFromText(
   const fromCaps = extractProminentCapsName(text)
   if (fromCaps) candidates.push({ name: fromCaps, score: scoreNameCandidate(fromCaps, 'caps') })
 
-  // Dacă eticheta e prezentă dar OCR a lipit prost, încearcă pe tot textul „OiNEA MIHAI” / „VOINEA MIHAI”
   for (const m of text.matchAll(/\b([A-Z0-9ĂÂÎȘȚ]{4,})\s+([A-ZĂÂÎȘȚ]{3,})\b/g)) {
     const hit = cleanupCapturedName(`${m[1]} ${m[2]}`)
     if (hit) candidates.push({ name: hit, score: scoreNameCandidate(hit, 'other') })
@@ -372,7 +416,6 @@ export function extractPersonNameFromText(
   candidates.sort((a, b) => b.score - a.score)
   if (candidates.length === 0) return null
 
-  // Dacă avem candidat bun din label sau filename, îl preferăm clar
   const best = candidates[0]
   if (best.score >= 4) return best.name
 

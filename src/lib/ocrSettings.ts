@@ -90,7 +90,8 @@ export function getPdfOcrSettings(tier: DeviceTier = detectDeviceTier()): PdfOcr
 
 /**
  * Decide dacă textul digital e suficient de bogat ca să sărim OCR-ul.
- * Nu sărim pe formulare/carnete — textul tipărit al etichetelor nu include scrisul de mână.
+ * Nu sărim pe formulare/carnete scanate — textul tipărit al etichetelor nu include scrisul de mână.
+ * Sărim pe transcrieri digitale complete ale carnetului (PDF text, nu foto).
  */
 export function shouldSkipOcrForEmbeddedText(
   embeddedText: string,
@@ -103,6 +104,21 @@ export function shouldSkipOcrForEmbeddedText(
     .toLowerCase()
     .normalize('NFD')
     .replace(/\p{M}/gu, '')
+
+  const digitCount = (text.match(/\d/g) ?? []).length
+  const wordCount = text.split(/\s+/).filter(Boolean).length
+  const richEnough = digitCount >= 4 && wordCount >= 12
+
+  // Transcriere text a carnetului: conține deja nume, date, retribuții — OCR e inutil
+  const isDigitalTranscription =
+    (lower.includes('transcriere') || lower.includes('transcript')) &&
+    (lower.includes('titular') ||
+      lower.includes('activitatea in munca') ||
+      lower.includes('retribut') ||
+      text.length >= Math.max(settings.skipOcrIfEmbeddedChars * 3, 2000))
+
+  if (isDigitalTranscription && richEnough) return true
+
   // Carnet / formular tipărit: etichetele au multe cuvinte, dar numele e scris de mână
   if (
     (lower.includes('numele') && lower.includes('prenume')) ||
@@ -114,7 +130,5 @@ export function shouldSkipOcrForEmbeddedText(
     return false
   }
 
-  const digitCount = (text.match(/\d/g) ?? []).length
-  const wordCount = text.split(/\s+/).filter(Boolean).length
-  return digitCount >= 4 && wordCount >= 12
+  return richEnough
 }

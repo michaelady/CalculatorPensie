@@ -682,51 +682,131 @@ const MONTH_MAP: Record<string, string> = {
   decembrie: '12',
 }
 
+function isValidYmd(y: number, mo: number, d: number): boolean {
+  if (y < 1900 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return false
+  const dt = new Date(Date.UTC(y, mo - 1, d))
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d
+}
+
 function normalizeDate(raw: string): string | undefined {
   const cleaned = raw.trim().toLowerCase().replace(/\s+/g, ' ')
 
+  // yyyy.mm.dd / yyyy-mm-dd (format carnet/Revisal) — ÎNAINTE de dd.mm.yyyy
+  let m = cleaned.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/)
+  if (!m) m = cleaned.match(/(?:^|[^\d])(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?:$|[^\d])/)
+  if (m) {
+    const y = Number(m[1])
+    const mo = Number(m[2])
+    const d = Number(m[3])
+    if (isValidYmd(y, mo, d)) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    }
+  }
+
   // dd.mm.yyyy / dd/mm/yyyy / dd-mm-yyyy
-  let m = cleaned.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/)
+  m = cleaned.match(/(?:^|[^\d])(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})(?:$|[^\d])/)
   if (m) {
-    const d = m[1].padStart(2, '0')
-    const mo = m[2].padStart(2, '0')
-    let y = m[3]
-    if (y.length === 2) y = Number(y) > 50 ? `19${y}` : `20${y}`
-    return `${y}-${mo}-${d}`
+    const d = Number(m[1])
+    const mo = Number(m[2])
+    let y = Number(m[3].length === 2 ? (Number(m[3]) > 50 ? `19${m[3]}` : `20${m[3]}`) : m[3])
+    if (isValidYmd(y, mo, d)) {
+      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+    }
   }
 
-  // yyyy-mm-dd
-  m = cleaned.match(/(\d{4})[./-](\d{1,2})[./-](\d{1,2})/)
-  if (m) {
-    return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
-  }
-
-  // 15 ianuarie 2010
+  // 15 ianuarie 2010 / 15 IAN 1970
   m = cleaned.match(/(\d{1,2})\s+([a-zăâîșț]+)\.?\s+(\d{4})/i)
   if (m) {
     const mo = MONTH_MAP[m[2].toLowerCase()]
-    if (mo) return `${m[3]}-${mo}-${m[1].padStart(2, '0')}`
+    const d = Number(m[1])
+    const y = Number(m[3])
+    if (mo && isValidYmd(y, Number(mo), d)) {
+      return `${y}-${mo}-${String(d).padStart(2, '0')}`
+    }
+  }
+
+  // 1961, luna Octombrie, ziua 01
+  m = cleaned.match(/(\d{4})\s*,?\s*luna\s+([a-zăâîșț]+)\s*,?\s*ziua\s+(\d{1,2})/i)
+  if (m) {
+    const mo = MONTH_MAP[m[2].toLowerCase()]
+    const y = Number(m[1])
+    const d = Number(m[3])
+    if (mo && isValidYmd(y, Number(mo), d)) {
+      return `${y}-${mo}-${String(d).padStart(2, '0')}`
+    }
   }
 
   return undefined
 }
 
+/** Grup numeric salariu: mii cu separator SAU 3–7 cifre complete (nu „135” din „1354”). */
+const SALARY_NUM = String.raw`(\d{1,3}(?:[.\s]\d{3})+(?:[.,]\d{2})?|\d{3,7}(?:[.,]\d{2})?)`
+
+function parseSalaryNumber(rawDigits: string): number | null {
+  const raw = rawDigits.replace(/\s/g, '').replace(/\.(?=\d{3}(?:\D|$))/g, '').replace(',', '.')
+  const n = Number.parseFloat(raw)
+  if (Number.isNaN(n) || n < 500 || n > 20_000_000) return null
+  return Math.round(n)
+}
+
 function parseSalary(text: string): number | null {
-  // Doar contexte explicite de salariu / monedă — evită confuzia cu date (ex. 01.03.2010)
+  // Doar contexte explicite de salariu / monedă / retribuție
   const patterns = [
-    /salari(?:u|ul|ului)?[^0-9]{0,24}(\d{1,3}(?:[.\s]\d{3})+|\d{3,6})(?:[.,]\d{2})?/i,
-    /(\d{1,3}(?:[.\s]\d{3})+|\d{4,6})\s*(?:lei|ron|leu)\b/i,
+    new RegExp(`ultimul\\s+salariu[^0-9]{0,40}${SALARY_NUM}`, 'i'),
+    new RegExp(`salari(?:u|ul|ului)?[^0-9]{0,24}${SALARY_NUM}`, 'i'),
+    new RegExp(`retribu(?:ție|tie|ția|tia)?[^0-9]{0,16}${SALARY_NUM}`, 'i'),
+    /(\d{1,3}(?:[.\s]\d{3})+|\d{3,6})\s*(?:lei|ron|leu)\b/i,
   ]
 
   for (const p of patterns) {
     const m = text.match(p)
     if (m) {
-      const raw = m[1].replace(/\s/g, '').replace(/\.(?=\d{3}(?:\D|$))/g, '').replace(',', '.')
-      const n = Number.parseFloat(raw)
-      if (!Number.isNaN(n) && n >= 800 && n <= 200000) return Math.round(n)
+      const n = parseSalaryNumber(m[1])
+      if (n != null) return n
     }
   }
   return null
+}
+
+/** Preferă mențiunea explicită „ultimul salariu …”. */
+function parseUltimulSalariu(text: string): number | null {
+  const m = text.match(new RegExp(`ultimul\\s+salariu[^0-9]{0,40}${SALARY_NUM}`, 'i'))
+  if (!m) return null
+  return parseSalaryNumber(m[1])
+}
+
+/** Data nașterii din text (când lipsește CNP-ul). */
+function extractBirthDateFromText(text: string): string | undefined {
+  // „Data și locul nașterii: 1961, luna Octombrie, ziua 01”
+  const labeled = text.match(
+    /data(?:\s+și\s+locul)?\s+na[sș]terii\s*[:—-]?\s*([^\n•●]{6,80})/i,
+  )
+  if (labeled?.[1]) {
+    const prose = labeled[1].match(
+      /(\d{4}\s*,?\s*luna\s+[A-Za-zăâîșț]+\s*,?\s*ziua\s+\d{1,2})/i,
+    )
+    const d = (prose ? normalizeDate(prose[0]) : undefined) ?? normalizeDate(labeled[1])
+    if (d) {
+      const y = Number(d.slice(0, 4))
+      if (y >= 1920 && y <= 2005) return d
+    }
+  }
+
+  // Proză „YYYY, luna …, ziua …” doar lângă naștere — nu „data întocmirii”
+  for (const m of text.matchAll(
+    /(\d{4})\s*,?\s*luna\s+([A-Za-zăâîșț]+)\s*,?\s*ziua\s+(\d{1,2})/gi,
+  )) {
+    const idx = m.index ?? 0
+    const ctx = text.slice(Math.max(0, idx - 100), idx + m[0].length + 10).toLowerCase()
+    if (/întocm|intocm|emiter|eliberat/i.test(ctx) && !/na[sș]ter/i.test(ctx)) continue
+    if (!/na[sș]ter|n[aă]scut|certificat\s+de\s+na/i.test(ctx)) continue
+    const d = normalizeDate(m[0])
+    if (d) {
+      const y = Number(d.slice(0, 4))
+      if (y >= 1920 && y <= 2005) return d
+    }
+  }
+  return undefined
 }
 
 function monthsBetween(start: string, end: string): number {
@@ -757,8 +837,9 @@ export function parseEmploymentDocument(
   const indiciiGasiti: string[] = []
   const avertismente: string[] = []
 
+  // yyyy.mm.dd ÎNAINTE de dd.mm.yyyy — altfel „1982.06.17” e citit greșit ca „82.06.17”
   const dateRegex =
-    /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+(?:ian|feb|mar|apr|mai|iun|iul|aug|sep|oct|noi|dec)[a-zăâîșț]*\.?\s+\d{4})/gi
+    /(\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+(?:ian|feb|mar|apr|mai|iun|iul|aug|sep|oct|noi|dec)[a-zăâîșț]*\.?\s+\d{4})/gi
 
   // Identitate: CNP + nume (inclusiv din numele fișierului, ex. Carte_Munca_Voinea_Mihai.pdf)
   const cnpDecoded = extractCnpFromText(text)
@@ -773,11 +854,17 @@ export function parseEmploymentDocument(
     }
   }
   if (!nume) nume = extractPersonNameFromText(text) ?? undefined
+
+  const dataNasteriiDinText = extractBirthDateFromText(text)
+  const dataNasterii = cnpDecoded?.dataNasterii ?? dataNasteriiDinText
+
   if (cnpDecoded) {
     indiciiGasiti.push(`CNP detectat: ${cnpDecoded.cnp}`)
     indiciiGasiti.push(
       `Din CNP: ${cnpDecoded.sex === 'M' ? 'bărbat' : 'femeie'}, născut(ă) ${cnpDecoded.dataNasterii}`,
     )
+  } else if (dataNasteriiDinText) {
+    indiciiGasiti.push(`Data nașterii detectată: ${dataNasteriiDinText}`)
   }
   if (nume) {
     indiciiGasiti.push(`Nume detectat: ${nume}`)
@@ -868,10 +955,16 @@ export function parseEmploymentDocument(
   const luniFinal = stagiuDinVechime != null && stagiuDinVechime > 0 ? stagiuDinVechime : totalLuni
   const stagiuEstimatAni = Math.floor(luniFinal / 12)
   const stagiuEstimatLuni = luniFinal % 12
+  // Preferă „ultimul salariu”; altfel media salariilor „recente” (RON, tipic < 50k)
+  const ultimulSalariu = parseUltimulSalariu(text)
+  const salariiRecente = salarii.filter((s) => s >= 800 && s <= 50_000)
   const salariuMediuEstimat =
-    salarii.length > 0
-      ? Math.round(salarii.reduce((s, x) => s + x, 0) / salarii.length)
-      : null
+    ultimulSalariu ??
+    (salariiRecente.length > 0
+      ? Math.round(salariiRecente.reduce((s, x) => s + x, 0) / salariiRecente.length)
+      : salarii.length > 0
+        ? Math.round(salarii.reduce((s, x) => s + x, 0) / salarii.length)
+        : null)
 
   if (angajari.length === 0 && !vechimeMatch) {
     avertismente.push(
@@ -895,7 +988,11 @@ export function parseEmploymentDocument(
     )
   }
   if (salariuMediuEstimat) {
-    indiciiGasiti.push(`Salariu mediu detectat: ${salariuMediuEstimat.toLocaleString('ro-RO')} lei`)
+    indiciiGasiti.push(
+      ultimulSalariu
+        ? `Ultimul salariu detectat: ${salariuMediuEstimat.toLocaleString('ro-RO')} lei`
+        : `Salariu mediu detectat: ${salariuMediuEstimat.toLocaleString('ro-RO')} lei`,
+    )
   }
   if (!nume) {
     avertismente.push('Nu am găsit numele în document — completează-l manual dacă e nevoie.')
@@ -913,7 +1010,7 @@ export function parseEmploymentDocument(
     nume: nume ?? undefined,
     cnp: cnpDecoded?.cnp,
     sex: cnpDecoded?.sex,
-    dataNasterii: cnpDecoded?.dataNasterii,
+    dataNasterii,
     indiciiGasiti,
     avertismente,
   }

@@ -49,6 +49,16 @@ assert(
   'must not skip OCR on carnet form labels',
 )
 
+const transcription = `
+Carte de Muncă — Voinea Mihai Transcriere text și tabele. Titular: VOINEA MIHAI.
+Data și locul nașterii: 1961, luna Octombrie, ziua 01. Activitatea în muncă 1982.06.17
+retribuție 1734. Ultimul salariu înscris: 1354 lei. Pagina 5 din 15 Cap. VI.
+`.repeat(8)
+assert(
+  shouldSkipOcrForEmbeddedText(transcription, high),
+  'must skip OCR on digital carnet transcription',
+)
+
 const tier = detectDeviceTier()
 assert(tier === 'low' || tier === 'mid' || tier === 'high', `tier ${tier}`)
 
