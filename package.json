@@ -1,0 +1,31 @@
+{
+  "name": "pensiero",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "test:carnet-ocr": "tsx scripts/verify-carnet-ocr.ts && tsx src/lib/cnp.selftest.ts",
+    "test:validate-pdf": "tsx scripts/validate-input-pdf.ts",
+    "test:unit": "tsx src/lib/cnp.selftest.ts && tsx src/lib/ocrSettings.selftest.ts && tsx src/lib/pension.selftest.ts"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.1.200",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "oxlint": "^1.71.0",
+    "tsx": "^4.23.2",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}
