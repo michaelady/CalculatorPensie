@@ -1,11 +1,10 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { parseEmploymentDocument, runOcrOnDocument, type OcrExtraction } from '../lib/ocr'
+import { getPdfOcrSettings } from '../lib/ocrSettings'
 
 interface DocumentUploadProps {
   onExtracted: (data: OcrExtraction) => void
 }
-
-const MAX_PDF_PAGES_HINT = 20
 
 function looksLikePdf(file: File): boolean {
   return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
@@ -20,6 +19,7 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
   const [error, setError] = useState<string | null>(null)
   const [lastText, setLastText] = useState<string | null>(null)
   const [pdfInfo, setPdfInfo] = useState<string | null>(null)
+  const maxPdfPagesHint = useMemo(() => getPdfOcrSettings().maxPages, [])
 
   const processFile = useCallback(
     async (file: File) => {
@@ -59,7 +59,7 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
           const processed = result.pagesProcessed ?? result.pageCount
           setPdfInfo(
             processed < result.pageCount
-              ? `PDF: ${processed} din ${result.pageCount} pagini procesate (limită ${MAX_PDF_PAGES_HINT})`
+              ? `PDF: ${processed} din ${result.pageCount} pagini procesate (limită ${maxPdfPagesHint} pe acest dispozitiv)`
               : `PDF: ${result.pageCount} ${result.pageCount === 1 ? 'pagină' : 'pagini'} procesate`,
           )
         }
@@ -80,7 +80,7 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
         setBusy(false)
       }
     },
-    [onExtracted],
+    [maxPdfPagesHint, onExtracted],
   )
 
   const onFiles = (files: FileList | null) => {
@@ -129,7 +129,8 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
 
         <p className="dropzone-title">Trage fișierul aici sau alege din dispozitiv</p>
         <p className="dropzone-meta">
-          JPG, PNG, WEBP, PDF (text sau scanat cu poze) — max. {MAX_PDF_PAGES_HINT} pagini OCR
+          JPG, PNG, WEBP, PDF (text sau scanat cu poze) — max. {maxPdfPagesHint} pagini
+          OCR pe acest dispozitiv
         </p>
 
         <div className="dropzone-actions">

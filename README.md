@@ -6,7 +6,7 @@ Aplicație web în română pentru estimarea pensiei din sistemul public, confor
 
 - Formular cu toate datele necesare: sex, data nașterii, stagiu de cotizare, salariu/punctaj, perioade asimilate, VPR
 - Calcul: puncte contributivitate + stabilitate + asimilate × VPR
-- Încărcare foto/scan/**PDF** (OCR Tesseract.js + PDF.js; inclusiv PDF-uri cu poze/scanate) pentru carte de muncă / adeverințe
+- Încărcare foto/scan/**PDF** (OCR Tesseract.js + PDF.js; inclusiv PDF-uri cu poze/scanate) pentru carte de muncă / adeverințe — procesare pagină-cu-pagină și calitate adaptivă pe telefoane cu memorie redusă
 - Estimare pensie brută și netă (CASS / impozit orientativ)
 
 ## Site public (GitHub Pages)

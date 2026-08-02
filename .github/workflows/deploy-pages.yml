@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - cursor/calculator-pensie-romania-51c8
+      - cursor/pdf-ocr-low-memory-3bdb
   workflow_dispatch:
 
 permissions:

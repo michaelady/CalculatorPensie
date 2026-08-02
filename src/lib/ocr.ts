@@ -1,4 +1,11 @@
 import { createWorker } from 'tesseract.js'
+import { getPdfOcrSettings } from './ocrSettings'
+
+/** Evită coliziunea de tipuri cu DOM Worker din lib.dom. */
+type TessWorker = {
+  recognize: (image: File | Blob | string) => Promise<{ data: { text: string } }>
+  terminate: () => Promise<unknown>
+}
 
 export interface OcrProgress {
   status: string
@@ -62,89 +69,163 @@ export async function runOcr(
   }
 }
 
+function combinePageText(embedded: string, ocrText: string): string {
+  const parts = [embedded, ocrText].filter((t) => t.length > 0)
+  if (parts.length === 0) return ''
+  if (
+    parts.length === 2 &&
+    embedded.length > 80 &&
+    ocrText.length < embedded.length * 0.3
+  ) {
+    return embedded
+  }
+  return [...new Set(parts)].join('\n')
+}
+
 /**
  * OCR pe imagine sau PDF (inclusiv PDF-uri scanate / cu poze).
- * Pentru PDF: randează fiecare pagină + OCR; folosește și textul încorporat dacă există.
+ * Pentru PDF: procesează pagină cu pagină (randare → OCR → eliberare memorie),
+ * cu setări adaptive pe dispozitive low-RAM / Android vechi.
  */
 export async function runOcrOnDocument(
   file: File,
   onProgress?: (p: OcrProgress) => void,
 ): Promise<DocumentOcrResult> {
-  const { isPdfUpload, renderPdfForOcr, canvasToBlob } = await import('./pdf')
+  const isPdf =
+    file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
 
-  if (isPdfUpload(file)) {
-    const rendered = await renderPdfForOcr(file, (status, progress) => {
-      onProgress?.({ status, progress })
-    })
+  if (isPdf) {
+    const {
+      processPdfPages,
+      canvasToBlob,
+      shouldSkipOcrForEmbeddedText,
+      yieldToMain,
+    } = await import('./pdf')
 
-    const worker = await createWorker('ron+eng', 1, {
-      logger: (m) => {
-        if (m.status && onProgress && m.status !== 'recognizing text') {
-          onProgress({
-            status: STATUS_MAP[String(m.status)] ?? String(m.status),
-            progress: typeof m.progress === 'number' ? m.progress * 0.15 : 0.3,
-          })
-        }
-      },
-    })
-
+    const settings = getPdfOcrSettings()
     const pageTexts: string[] = []
+    const workerRef: { current: TessWorker | null } = { current: null }
+
+    const ensureWorker = async (): Promise<TessWorker> => {
+      if (workerRef.current) return workerRef.current
+      onProgress?.({ status: 'Se încarcă motorul OCR…', progress: 0.28 })
+      const created = await createWorker(settings.tesseractLang, 1, {
+        logger: (m) => {
+          if (m.status && onProgress && m.status !== 'recognizing text') {
+            onProgress({
+              status: STATUS_MAP[String(m.status)] ?? String(m.status),
+              progress: typeof m.progress === 'number' ? 0.28 + m.progress * 0.05 : 0.3,
+            })
+          }
+        },
+      })
+      workerRef.current = created as unknown as TessWorker
+      return workerRef.current
+    }
+
     try {
-      const n = rendered.pages.length
-      for (let i = 0; i < n; i++) {
-        const page = rendered.pages[i]
-        const embedded = page.embeddedText.trim()
+      const meta = await processPdfPages(
+        file,
+        async (page) => {
+          const embedded = page.embeddedText.trim()
+          const n = page.pagesToProcess
+          const idx = page.pageNumber - 1
 
-        onProgress?.({
-          status: `OCR pagină ${page.pageNumber} din ${n}…`,
-          progress: 0.3 + (0.65 * i) / n,
-        })
+          onProgress?.({
+            status: `OCR pagină ${page.pageNumber} din ${n}…`,
+            progress: 0.3 + (0.65 * idx) / n,
+          })
 
-        // Întotdeauna OCR pe imaginea paginii — acoperă PDF-uri scanate / cu poze
-        const blob = await canvasToBlob(page.canvas)
-        const { data } = await worker.recognize(blob)
-        const ocrText = (data.text ?? '').trim()
+          let ocrText = ''
+          const skipOcr =
+            !page.canvas || shouldSkipOcrForEmbeddedText(embedded, page.settings)
 
-        // Combină textul digital (dacă există) cu OCR — util pentru PDF-uri mixte
-        const parts = [embedded, ocrText].filter((t) => t.length > 0)
-        const combined =
-          parts.length === 2 && embedded.length > 80 && ocrText.length < embedded.length * 0.3
-            ? embedded
-            : [...new Set(parts)].join('\n')
+          if (!skipOcr && page.canvas) {
+            const w = await ensureWorker()
+            // JPEG e mult mai ușor în memorie decât PNG pe telefoane vechi
+            const blob = await canvasToBlob(
+              page.canvas,
+              page.settings.jpegQuality,
+              'image/jpeg',
+            )
+            const { data } = await w.recognize(blob)
+            ocrText = (data.text ?? '').trim()
+          }
 
-        if (combined.trim()) {
-          pageTexts.push(`--- Pagina ${page.pageNumber} ---\n${combined.trim()}`)
-        }
+          const combined = combinePageText(embedded, ocrText)
+          if (combined.trim()) {
+            pageTexts.push(`--- Pagina ${page.pageNumber} ---\n${combined.trim()}`)
+          }
+
+          await yieldToMain()
+        },
+        (status, progress) => {
+          onProgress?.({ status, progress })
+        },
+        settings,
+      )
+
+      onProgress?.({ status: 'Gata', progress: 1 })
+
+      if (pageTexts.length === 0) {
+        throw new Error(
+          'Nu am putut citi text din PDF. Încearcă un scan mai clar sau o fotografie a paginii.',
+        )
+      }
+
+      let note = ''
+      if (meta.pageCount > meta.pagesProcessed) {
+        note = `\n\n[Notă: au fost procesate ${meta.pagesProcessed} din ${meta.pageCount} pagini (mod economie memorie)]`
+      }
+
+      return {
+        text: pageTexts.join('\n\n') + note,
+        previewUrl: meta.previewUrl,
+        pageCount: meta.pageCount,
+        pagesProcessed: meta.pagesProcessed,
       }
     } finally {
-      await worker.terminate()
-    }
-
-    onProgress?.({ status: 'Gata', progress: 1 })
-
-    if (pageTexts.length === 0) {
-      throw new Error(
-        'Nu am putut citi text din PDF. Încearcă un scan mai clar sau o fotografie a paginii.',
-      )
-    }
-
-    let note = ''
-    if (rendered.pageCount > rendered.pagesProcessed) {
-      note = `\n\n[Notă: au fost procesate ${rendered.pagesProcessed} din ${rendered.pageCount} pagini]`
-    }
-
-    return {
-      text: pageTexts.join('\n\n') + note,
-      previewUrl: rendered.previewUrl,
-      pageCount: rendered.pageCount,
-      pagesProcessed: rendered.pagesProcessed,
+      const activeWorker = workerRef.current
+      workerRef.current = null
+      if (activeWorker) {
+        try {
+          await activeWorker.terminate()
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 
-  // Imagine clasică
-  const text = await runOcr(file, onProgress)
+  // Imagine clasică — pe low-end folosim doar română ca să reducem modelul
+  const lang = getPdfOcrSettings().tesseractLang
+  const text = await runOcrWithLang(file, lang, onProgress)
   const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
   return { text, previewUrl }
+}
+
+async function runOcrWithLang(
+  file: File | Blob,
+  lang: string,
+  onProgress?: (p: OcrProgress) => void,
+): Promise<string> {
+  const worker = await createWorker(lang, 1, {
+    logger: (m) => {
+      if (onProgress && typeof m.progress === 'number') {
+        onProgress({
+          status: STATUS_MAP[String(m.status)] ?? String(m.status ?? 'Procesare…'),
+          progress: m.progress,
+        })
+      }
+    },
+  })
+
+  try {
+    const { data } = await worker.recognize(file)
+    return data.text ?? ''
+  } finally {
+    await worker.terminate()
+  }
 }
 
 const MONTH_MAP: Record<string, string> = {
