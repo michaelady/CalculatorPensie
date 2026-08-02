@@ -83,7 +83,9 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
         setPdfInfo(infoParts.length > 0 ? infoParts.join(' · ') : null)
 
         setLastText(result.text)
-        const extracted = parseEmploymentDocument(result.text)
+        const extracted = parseEmploymentDocument(result.text, {
+          filenames: files.map((f) => f.name),
+        })
         if (files.length > 1) {
           extracted.indiciiGasiti = [
             `Surse combinate: ${files.length} fișiere (scan / Revisal / altele)`,

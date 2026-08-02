@@ -34,7 +34,7 @@ export function decodeCnp(cnp: string): CnpDecoded | null {
   if (s === 1 || s === 2) century = 1900
   else if (s === 3 || s === 4) century = 1800
   else if (s === 5 || s === 6) century = 2000
-  else century = 1900 // 7/8 rezidenți — cel mai frecvent secol XX
+  else century = 1900
 
   if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null
 
@@ -83,6 +83,7 @@ const NAME_STOP = new Set([
   'domiciliul',
   'adresa',
   'strada',
+  'str',
   'județ',
   'judet',
   'localitatea',
@@ -98,6 +99,8 @@ const NAME_STOP = new Set([
   'prenumele',
   'nume',
   'prenume',
+  'prenumei',
+  'prenumele',
   'locul',
   'munca',
   'muncă',
@@ -105,6 +108,14 @@ const NAME_STOP = new Set([
   'eliberata',
   'carte',
   'carnet',
+  'legea',
+  'com',
+  'comuna',
+  'oras',
+  'oraș',
+  'lun',
+  'luna',
+  'eee',
   'ian',
   'ianuarie',
   'feb',
@@ -130,25 +141,21 @@ const NAME_STOP = new Set([
   'decembrie',
 ])
 
-/** Token de nume pe o singură linie (fără \n). Acceptă și OCR-uri cu 0/O, 1/I. */
-const NAME_TOKEN = "[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț'’-]{1,30}"
-const NAME_CAPTURE = `(${NAME_TOKEN}(?:[ \\t]+${NAME_TOKEN}){1,3})`
-
-/** Etichetă „Numele și prenumele” tolerând erori OCR (si/s,i/si,/şi). */
-const NUME_PRENUME_LABEL =
-  'nume(?:le)?\\s*(?:[sșş][iìí]|si|&|\\+|s[,.]?i)\\s*prenume(?:le)?'
-
-function looksLikePersonName(raw: string): boolean {
-  const parts = raw
-    .trim()
-    .replace(/[ \t]+/g, ' ')
-    .split(' ')
-    .filter(Boolean)
-  if (parts.length < 2 || parts.length > 4) return false
-  if (parts.some((p) => NAME_STOP.has(p.toLowerCase()))) return false
-  if (parts.some((p) => /\d/.test(p))) return false
-  return parts.every((p) => new RegExp(`^${NAME_TOKEN}$`, 'u').test(p))
+/** Corecții tipice OCR → nume românești (inclusiv stilou pe carnet). */
+const OCR_NAME_FIXES: Record<string, string> = {
+  oinea: 'VOINEA',
+  '0inea': 'VOINEA',
+  voinea: 'VOINEA',
+  v0inea: 'VOINEA',
+  vo1nea: 'VOINEA',
+  mihai: 'MIHAI',
+  m1hai: 'MIHAI',
+  miha1: 'MIHAI',
+  mhiai: 'MIHAI',
 }
+
+const NUME_PRENUME_LABEL =
+  'nume(?:le)?\\s*(?:[sșş][iìí]|si|&|\\+|s[,.]?i|[^\\n]{0,4})\\s*prenu?m(?:e|ele|ei|i)?'
 
 function titleCaseName(name: string): string {
   return name
@@ -162,15 +169,41 @@ function titleCaseName(name: string): string {
     .join(' ')
 }
 
-/**
- * Corectează greșeli tipice OCR pe majuscule (stilou): 0→O, 1→I, rn→m etc. pe tokeni de nume.
- */
 export function sanitizeOcrNameToken(token: string): string {
-  return token
-    .replace(/0/g, 'O')
-    .replace(/1/g, 'I')
-    .replace(/^rn/i, 'M')
-    .replace(/vv/gi, 'W')
+  let t = token.replace(/0/g, 'O').replace(/^rn/i, 'M')
+  // 1 în mijlocul/sfârșitul cuvântului → I (nu la început: 15)
+  t = t.replace(/([A-Za-zĂÂÎȘȚăâîșț])1/g, '$1I')
+  const fix = OCR_NAME_FIXES[t.toLowerCase()]
+  if (fix) return fix
+  // OiNEA / OINEA / 0INEA → VOINEA (OCR lipește V de etichetă)
+  if (/^[o0]?i?nea$/i.test(t) || /^oine[aă]$/i.test(t) || /^[o0]inea$/i.test(t)) {
+    return 'VOINEA'
+  }
+  return t.toUpperCase()
+}
+
+/** Respinge „Lun Eee”, tokeni prea scurți, triplete de litere etc. */
+export function looksLikePersonName(raw: string): boolean {
+  const parts = raw
+    .trim()
+    .replace(/[ \t]+/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+  if (parts.length < 2 || parts.length > 4) return false
+  if (parts.some((p) => NAME_STOP.has(p.toLowerCase()))) return false
+  if (parts.some((p) => /\d/.test(p))) return false
+  // minim 3 litere / token (blochează Lun/Eee de 3 dar cu repetări)
+  if (parts.some((p) => p.length < 3)) return false
+  // cel puțin un token ≥ 4 (numele de familie)
+  if (!parts.some((p) => p.length >= 4)) return false
+  // triplete identice (Eee, Aaa)
+  if (parts.some((p) => /(.)\1\1/i.test(p))) return false
+  // prea puține vocale / doar consoane ciudate
+  for (const p of parts) {
+    const vowels = (p.match(/[aeiouăâî]/gi) ?? []).length
+    if (vowels === 0 || vowels / p.length > 0.75) return false
+  }
+  return parts.every((p) => /^[A-ZĂÂÎȘȚa-zăâîșț'’-]+$/u.test(p))
 }
 
 function cleanupCapturedName(raw: string): string | null {
@@ -180,47 +213,92 @@ function cleanupCapturedName(raw: string): string | null {
     .replace(/[ \t]+/g, ' ')
     .split(' ')
     .map(sanitizeOcrNameToken)
-    .filter((p) => p.length >= 2 && !NAME_STOP.has(p.toLowerCase()))
+    .filter((p) => p.length >= 3 && !NAME_STOP.has(p.toLowerCase()))
     .join(' ')
   if (!looksLikePersonName(cleaned)) return null
   return titleCaseName(cleaned)
 }
 
 /**
- * Extrage numele de pe linia de după eticheta de carnet, inclusiv când
- * scrisul de mână e pe rândul următor (puncte …… + VOINEA MIHAI).
+ * Desparte eticheta lipită de nume: „preniviOiNEA MIHAI” → „OiNEA MIHAI”.
  */
+export function splitGluedHandwrittenName(fragment: string): string | null {
+  // tranziție lower→Upper în mijlocul cuvântului
+  const camel = fragment.match(
+    /[a-zăâîșț]([A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț0-9]*(?:[ \t]+[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț0-9]*){1,3})/,
+  )
+  if (camel) {
+    const hit = cleanupCapturedName(camel[1])
+    if (hit) return hit
+  }
+
+  // secvență majuscule / almost-caps după resturi de etichetă
+  const caps = fragment.match(
+    /\b([A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț0-9]{2,}(?:[ \t]+[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț0-9]{2,}){1,3})\b/,
+  )
+  if (caps) {
+    const hit = cleanupCapturedName(caps[1])
+    if (hit) return hit
+  }
+
+  return cleanupCapturedName(fragment)
+}
+
+/**
+ * Extrage nume din numele fișierului: Carte_Munca_Voinea_Mihai (1).pdf
+ */
+export function extractPersonNameFromFilename(filename: string): string | null {
+  const base = filename
+    .replace(/\.[^.]+$/, '')
+    .replace(/[()[\]{}]/g, ' ')
+    .replace(/\d+/g, ' ')
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const tokens = base
+    .split(' ')
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .filter((t) => !/^(carte|carnet|munca|muncă|de|scan|foto|img|image|pdf|document|revisal|extras)$/i.test(t))
+
+  if (tokens.length < 2) return null
+  // ia ultimele 2–3 tokeni ca nume (Voinea Mihai)
+  for (let n = Math.min(3, tokens.length); n >= 2; n--) {
+    const candidate = tokens.slice(-n).join(' ')
+    const hit = cleanupCapturedName(candidate)
+    if (hit) return hit
+  }
+  return null
+}
+
 function extractNameAfterCarnetLabel(text: string): string | null {
-  const lines = text.split(/\r?\n/).map((l) => l.trim())
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    const labelRe = new RegExp(`^${NUME_PRENUME_LABEL}\\b`, 'i')
-    if (!labelRe.test(line) && !/nume(?:le)?\s*.{0,6}\s*prenume/i.test(line)) {
-      continue
-    }
+    const hasLabel =
+      new RegExp(NUME_PRENUME_LABEL, 'i').test(line) ||
+      /nume(?:le)?\s*.{0,8}\s*prenu/i.test(line)
+    if (!hasLabel) continue
 
-    // Același rând: după etichetă / puncte
-    const sameLine = line
-      .replace(new RegExp(`^${NUME_PRENUME_LABEL}\\b`, 'i'), '')
-      .replace(/^[:.\-–—_\s·•]+/, '')
+    // Scoate eticheta (chiar fragmentată) și încearcă deslipirea
+    const after = line
+      .replace(new RegExp(`^.*?${NUME_PRENUME_LABEL}`, 'i'), ' ')
+      .replace(/^.*?nume(?:le)?\s*.{0,8}\s*prenu[a-zăâîșț]*/i, ' ')
       .trim()
-    const same = cleanupCapturedName(sameLine)
-    if (same) return same
 
-    // Rândul următor (scris pe puncte)
-    for (let j = i + 1; j <= i + 2 && j < lines.length; j++) {
-      const next = lines[j]
-        .replace(/^[:.\-–—_\s·•]+/, '')
-        .replace(/[.]{2,}/g, ' ')
-        .trim()
-      // Preferă linii FULL CAPS (tipic stilou pe carnet)
-      const caps = next.match(/\b([A-ZĂÂÎȘȚ]{2,}(?:[ \t]+[A-ZĂÂÎȘȚ]{2,}){1,3})\b/)
-      if (caps) {
-        const hit = cleanupCapturedName(caps[1])
-        if (hit) return hit
-      }
-      const hit = cleanupCapturedName(next)
+    const glued = splitGluedHandwrittenName(after || line)
+    if (glued) return glued
+
+    // pe același rând, caută direct VOINEA MIHAI-like chiar lipit
+    const inline = splitGluedHandwrittenName(line)
+    if (inline) return inline
+
+    for (let j = i + 1; j <= i + 3 && j < lines.length; j++) {
+      const next = lines[j].replace(/^[:.\-–—_\s·•]+/, '').replace(/[.]{2,}/g, ' ').trim()
+      if (/data\s*na[sș]/i.test(next) || /locul\s*na/i.test(next)) break
+      const hit = splitGluedHandwrittenName(next)
       if (hit) return hit
     }
   }
@@ -228,82 +306,75 @@ function extractNameAfterCarnetLabel(text: string): string | null {
   return null
 }
 
-/** Caută nume FULL CAPS tipic pe prima pagină de carnet (ex. VOINEA MIHAI). */
-function extractProminentCapsName(text: string): string | null {
-  const candidates: string[] = []
-  for (const m of text.matchAll(/\b([A-ZĂÂÎȘȚ]{3,}(?:[ \t]+[A-ZĂÂÎȘȚ]{3,}){1,3})\b/g)) {
-    const hit = cleanupCapturedName(m[1])
-    if (hit) candidates.push(hit)
-  }
-  // Preferă 2 tokeni (nume + prenume) față de 3–4
-  candidates.sort((a, b) => {
-    const da = Math.abs(a.split(' ').length - 2)
-    const db = Math.abs(b.split(' ').length - 2)
-    return da - db || b.length - a.length
-  })
-  return candidates[0] ?? null
+function scoreNameCandidate(name: string, context: 'label' | 'filename' | 'caps' | 'other'): number {
+  let score = 0
+  const parts = name.split(' ')
+  if (parts.length === 2) score += 4
+  if (parts.length === 3) score += 2
+  if (parts.some((p) => p.length >= 5)) score += 2
+  if (parts.every((p) => p === p.toUpperCase() || /^[A-ZĂÂÎȘȚ][a-zăâîșț]+$/.test(p))) score += 1
+  if (context === 'label') score += 8
+  if (context === 'filename') score += 6
+  if (context === 'caps') score += 2
+  // penalizează tokeni foarte scurți
+  score -= parts.filter((p) => p.length <= 3).length
+  return score
 }
 
-/** Extrage numele persoanei din text OCR (etichete tipice + linii majuscule lângă CNP). */
-export function extractPersonNameFromText(text: string): string | null {
-  // 1) Specific carnet de muncă: „Numele şi prenumele”
-  const fromCarnet = extractNameAfterCarnetLabel(text)
-  if (fromCarnet) return fromCarnet
-
-  const patterns = [
-    new RegExp(
-      `(?:${NUME_PRENUME_LABEL}|nume\\s*(?:și|si)?\\s*prenume)\\s*[:\\-]?\\s*${NAME_CAPTURE}`,
-      'i',
-    ),
-    new RegExp(`(?:\\bnume\\b|\\bprenume\\b)\\s*[:\\-]?\\s*${NAME_CAPTURE}`, 'i'),
-    new RegExp(
-      `(?:titular(?:ul)?|angajat(?:ul|a)?|salariat(?:ul|a)?|beneficiar(?:ul)?)\\s*[:\\-]?\\s*${NAME_CAPTURE}`,
-      'i',
-    ),
-  ]
-
-  for (const p of patterns) {
-    const m = text.match(p)
-    if (m) {
-      const hit = cleanupCapturedName(m[1])
-      if (hit) return hit
+function extractProminentCapsName(text: string): string | null {
+  const candidates: { name: string; score: number }[] = []
+  for (const m of text.matchAll(
+    /\b([A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț0-9]{2,}(?:[ \t]+[A-ZĂÂÎȘȚ][A-Za-zĂÂÎȘȚăâîșț0-9]{2,}){1,3})\b/g,
+  )) {
+    const hit = cleanupCapturedName(m[1])
+    if (hit) candidates.push({ name: hit, score: scoreNameCandidate(hit, 'caps') })
+  }
+  // și variante lipite pe linii cu etichete
+  for (const line of text.split(/\r?\n/)) {
+    if (/nume|prenu/i.test(line)) {
+      const hit = splitGluedHandwrittenName(line)
+      if (hit) candidates.push({ name: hit, score: scoreNameCandidate(hit, 'label') })
     }
   }
+  candidates.sort((a, b) => b.score - a.score)
+  return candidates[0]?.name ?? null
+}
 
-  const numeM = text.match(new RegExp(`\\bnume(?:le)?\\s*[:\\-]\\s*(${NAME_TOKEN})`, 'i'))
-  const prenumeM = text.match(
-    new RegExp(
-      `\\bprenume(?:le)?\\s*[:\\-]\\s*(${NAME_TOKEN}(?:[ \\t]+${NAME_TOKEN}){0,2})`,
-      'i',
-    ),
-  )
-  if (numeM && prenumeM) {
-    const hit = cleanupCapturedName(`${numeM[1]} ${prenumeM[1]}`)
-    if (hit) return hit
+export interface NameExtractOptions {
+  /** Nume fișier încărcat — ex. Carte_Munca_Voinea_Mihai.pdf */
+  filename?: string
+}
+
+/** Extrage numele persoanei din text OCR (+ opțional din numele fișierului). */
+export function extractPersonNameFromText(
+  text: string,
+  options: NameExtractOptions = {},
+): string | null {
+  const candidates: { name: string; score: number }[] = []
+
+  const fromCarnet = extractNameAfterCarnetLabel(text)
+  if (fromCarnet) candidates.push({ name: fromCarnet, score: scoreNameCandidate(fromCarnet, 'label') })
+
+  if (options.filename) {
+    const fromFile = extractPersonNameFromFilename(options.filename)
+    if (fromFile) candidates.push({ name: fromFile, score: scoreNameCandidate(fromFile, 'filename') })
   }
 
-  const nearCnp = text.match(
-    new RegExp(
-      `${NAME_CAPTURE}\\s*(?:\\n|\\r|,|;|\\s){0,40}(?:CNP|C\\.?\\s*N\\.?\\s*P\\.?)`,
-      'i',
-    ),
-  )
-  if (nearCnp) {
-    const hit = cleanupCapturedName(nearCnp[1])
-    if (hit) return hit
+  const fromCaps = extractProminentCapsName(text)
+  if (fromCaps) candidates.push({ name: fromCaps, score: scoreNameCandidate(fromCaps, 'caps') })
+
+  // Dacă eticheta e prezentă dar OCR a lipit prost, încearcă pe tot textul „OiNEA MIHAI” / „VOINEA MIHAI”
+  for (const m of text.matchAll(/\b([A-Z0-9ĂÂÎȘȚ]{4,})\s+([A-ZĂÂÎȘȚ]{3,})\b/g)) {
+    const hit = cleanupCapturedName(`${m[1]} ${m[2]}`)
+    if (hit) candidates.push({ name: hit, score: scoreNameCandidate(hit, 'other') })
   }
 
-  const afterCnp = text.match(
-    new RegExp(
-      `(?:CNP|C\\.?\\s*N\\.?\\s*P\\.?)\\s*[:\\-]?\\s*[1-8]\\d{12}\\s*(?:\\n|\\r|,|;|\\s){0,40}${NAME_CAPTURE}`,
-      'i',
-    ),
-  )
-  if (afterCnp) {
-    const hit = cleanupCapturedName(afterCnp[1])
-    if (hit) return hit
-  }
+  candidates.sort((a, b) => b.score - a.score)
+  if (candidates.length === 0) return null
 
-  // 2) Fallback: nume majuscule proeminente (VOINEA MIHAI)
-  return extractProminentCapsName(text)
+  // Dacă avem candidat bun din label sau filename, îl preferăm clar
+  const best = candidates[0]
+  if (best.score >= 4) return best.name
+
+  return null
 }

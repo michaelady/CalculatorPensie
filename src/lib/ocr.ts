@@ -237,10 +237,22 @@ async function runOcrOnPdfFile(
               const second = await w.recognize(blob)
               const sparseText = (second.data.text ?? '').trim()
               if (sparseText) {
-                // Combină: păstrează ambele, fără duplicate exacte
                 ocrText = [...new Set([ocrText, sparseText].filter(Boolean))].join('\n')
               }
               await w.setParameters({ tessedit_pageseg_mode: PSM_BLOCK }).catch(() => undefined)
+            }
+
+            // Bandă „Numele şi prenumele” (zona de sus) — OCR dedicat pe prima pagină / carnet
+            if (
+              absolutePage === 1 ||
+              handwriting ||
+              looksLikeHandwrittenForm(ocrText) ||
+              !extractPersonNameFromText(`${embedded}\n${ocrText}`)
+            ) {
+              const bandText = await recognizeNameBand(w, enhanced, settings.lowMemory)
+              if (bandText) {
+                ocrText = `${ocrText}\nNumele şi prenumele ${bandText}`.trim()
+              }
             }
           } finally {
             if (enhanced && enhanced !== page.canvas) releaseCanvas(enhanced)
@@ -495,6 +507,58 @@ export function mergeOcrExtractions(parts: OcrExtraction[]): OcrExtraction {
   return merged
 }
 
+/** OCR pe banda de sus a paginii (câmpul Numele şi prenumele din carnet). */
+async function recognizeNameBand(
+  worker: TessWorker,
+  source: HTMLCanvasElement,
+  lowMemory?: boolean,
+): Promise<string> {
+  const { enhanceCanvasForOcr } = await import('./imagePreprocess')
+  const { releaseCanvas, canvasToBlob } = await import('./pdf')
+
+  const w = source.width
+  const h = source.height
+  // Zona tipică a numelui pe carnet: ~12%–32% din înălțime
+  const top = Math.floor(h * 0.1)
+  const bandH = Math.floor(h * 0.22)
+  const band = document.createElement('canvas')
+  band.width = w
+  band.height = Math.max(1, bandH)
+  const ctx = band.getContext('2d')
+  if (!ctx) return ''
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, band.width, band.height)
+  ctx.drawImage(source, 0, top, w, bandH, 0, 0, w, bandH)
+
+  let enhanced: HTMLCanvasElement | null = null
+  try {
+    enhanced = enhanceCanvasForOcr(band, {
+      upscale: lowMemory ? 1.5 : 2,
+      threshold: 165,
+      lowMemory,
+    })
+    const blob = await canvasToBlob(enhanced, 0.95, 'image/png')
+    await worker
+      .setParameters({
+        tessedit_pageseg_mode: '7', // single text line
+        tessedit_char_whitelist:
+          "AĂÂBCDEFGHIÎJKLMNOPQRSȘTȚUVWXYZaăâbcdefghiîjklmnopqrsștțuvwxyz .-'",
+      })
+      .catch(() => undefined)
+    const { data } = await worker.recognize(blob)
+    await worker
+      .setParameters({
+        tessedit_pageseg_mode: PSM_BLOCK,
+        tessedit_char_whitelist: '',
+      })
+      .catch(() => undefined)
+    return (data.text ?? '').replace(/\s+/g, ' ').trim()
+  } finally {
+    releaseCanvas(band)
+    if (enhanced) releaseCanvas(enhanced)
+  }
+}
+
 async function loadImageToCanvas(file: File | Blob): Promise<HTMLCanvasElement> {
   const url = URL.createObjectURL(file)
   try {
@@ -565,11 +629,17 @@ async function runOcrWithLang(
     let text = (first.data.text ?? '').trim()
 
     if (opts?.handwriting) {
-      onProgress?.({ status: 'OCR scris de mână (trecere 2)…', progress: 0.7 })
+      onProgress?.({ status: 'OCR scris de mână (trecere 2)…', progress: 0.65 })
       await worker.setParameters({ tessedit_pageseg_mode: PSM_SPARSE }).catch(() => undefined)
       const second = await worker.recognize(source)
       const sparse = (second.data.text ?? '').trim()
       if (sparse) text = [...new Set([text, sparse].filter(Boolean))].join('\n')
+
+      if (enhanced) {
+        onProgress?.({ status: 'OCR câmp nume…', progress: 0.85 })
+        const bandText = await recognizeNameBand(worker, enhanced, opts.lowMemory)
+        if (bandText) text = `${text}\nNumele şi prenumele ${bandText}`
+      }
     }
 
     return text
@@ -673,7 +743,10 @@ function monthsBetween(start: string, end: string): number {
  * Extrage din text OCR indicii despre angajări, stagiu, salarii, nume și CNP.
  * Cartea de muncă variază ca format — rezultatul e o estimare de completat manual.
  */
-export function parseEmploymentDocument(text: string): OcrExtraction {
+export function parseEmploymentDocument(
+  text: string,
+  options?: { filenames?: string[] },
+): OcrExtraction {
   const lines = text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -687,9 +760,19 @@ export function parseEmploymentDocument(text: string): OcrExtraction {
   const dateRegex =
     /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+(?:ian|feb|mar|apr|mai|iun|iul|aug|sep|oct|noi|dec)[a-zăâîșț]*\.?\s+\d{4})/gi
 
-  // Identitate: CNP + nume
+  // Identitate: CNP + nume (inclusiv din numele fișierului, ex. Carte_Munca_Voinea_Mihai.pdf)
   const cnpDecoded = extractCnpFromText(text)
-  const nume = extractPersonNameFromText(text)
+  let nume: string | undefined
+  if (options?.filenames?.length) {
+    for (const fn of options.filenames) {
+      const hit = extractPersonNameFromText(text, { filename: fn })
+      if (hit) {
+        nume = hit
+        break
+      }
+    }
+  }
+  if (!nume) nume = extractPersonNameFromText(text) ?? undefined
   if (cnpDecoded) {
     indiciiGasiti.push(`CNP detectat: ${cnpDecoded.cnp}`)
     indiciiGasiti.push(

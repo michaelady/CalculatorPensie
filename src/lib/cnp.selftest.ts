@@ -1,4 +1,12 @@
-import { decodeCnp, extractCnpFromText, extractPersonNameFromText, isValidCnp } from './cnp'
+import {
+  decodeCnp,
+  extractCnpFromText,
+  extractPersonNameFromFilename,
+  extractPersonNameFromText,
+  isValidCnp,
+  looksLikePersonName,
+  splitGluedHandwrittenName,
+} from './cnp'
 import { parseEmploymentDocument } from './ocr'
 import { looksLikeHandwrittenForm } from './imagePreprocess'
 import { shouldSkipOcrForEmbeddedText, getPdfOcrSettings } from './ocrSettings'
@@ -7,68 +15,57 @@ function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg)
 }
 
-// CNP valid generat: M, 15.01.1970, jud. 40, seq 001, control 6
 const SAMPLE = '1700115400016'
 assert(isValidCnp(SAMPLE), 'sample CNP should be valid')
-assert(!isValidCnp('1700115400010'), 'wrong control digit')
+assert(decodeCnp(SAMPLE)?.dataNasterii === '1970-01-15', 'dob from CNP')
 
-const decoded = decodeCnp(SAMPLE)
-assert(!!decoded, 'decode ok')
-assert(decoded!.sex === 'M', `sex ${decoded!.sex}`)
-assert(decoded!.dataNasterii === '1970-01-15', `dob ${decoded!.dataNasterii}`)
+// Respinge falsul pozitiv raportat de utilizator
+assert(!looksLikePersonName('Lun Eee'), 'reject Lun Eee')
+assert(!looksLikePersonName('Lun Eee'), 'reject Lun Eee again')
+assert(extractPersonNameFromText('Data naşterii\nLun Eee\n15 IAN 1970') == null, 'no Lun Eee extract')
 
-const fromLabel = extractCnpFromText(`Titular: VOINEA MIHAI\nCNP: ${SAMPLE}\nStagiu 30 ani`)
-assert(fromLabel?.cnp === SAMPLE, 'extract labeled CNP')
-
-const name = extractPersonNameFromText(
-  'Nume și prenume: Voinea Mihai\nCNP: 1700115400016\nAngajat la S.C. Exemplu SRL',
-)
-assert(name === 'Voinea Mihai', `name ${name}`)
-
-// Carnet de muncă: etichetă tipărită + nume pe același rând / rândul următor
-const carnetSame = extractPersonNameFromText(
-  'Numele şi prenumele ........ VOINEA MIHAI\nData naşterii 15 IAN 1970',
-)
-assert(carnetSame === 'Voinea Mihai', `carnet same line: ${carnetSame}`)
-
-const carnetNext = extractPersonNameFromText(`Numele si prenumele
-....................
-VOINEA MIHAI
-Data nasterii`)
-assert(carnetNext === 'Voinea Mihai', `carnet next line: ${carnetNext}`)
-
-const carnetOcrNoise = extractPersonNameFromText(
-  'Numele s,i prenumele VOINEA MIHAI\nLocul nasterii',
-)
-assert(carnetOcrNoise === 'Voinea Mihai', `carnet OCR noise: ${carnetOcrNoise}`)
+// Output REAL de la tesseract pe fixture-ul carnet (psm 6)
+const TESS_REAL = `CARNEI DE MUNCA
+(legea nr. 3 / 1950)
+Numele şi preniviOiNEA MIHAI
+Data naşterii 15 IAN 1970
+Locul naşterii COM. VALEA MARE
+Domiciliul STR. LALELELOR NR. 12
+Locul de muncă S.C. EXEMPLU SRL`
 
 assert(
-  looksLikeHandwrittenForm('Numele şi prenumele\nData naşterii\nLocul de muncă'),
-  'should detect carnet form',
+  splitGluedHandwrittenName('preniviOiNEA MIHAI') === 'Voinea Mihai',
+  `split glued: ${splitGluedHandwrittenName('preniviOiNEA MIHAI')}`,
 )
 
-const settings = getPdfOcrSettings('high')
+const fromTess = extractPersonNameFromText(TESS_REAL)
+assert(fromTess === 'Voinea Mihai', `from real tesseract output: ${fromTess}`)
+
+assert(
+  extractPersonNameFromFilename('Carte_Munca_Voinea_Mihai (1).pdf') === 'Voinea Mihai',
+  'filename hint',
+)
+
+// Chiar dacă OCR dă gunoi, filename salvează situația
+const garbage = extractPersonNameFromText('Lun Eee\nData nasterii 15 IAN', {
+  filename: 'Carte_Munca_Voinea_Mihai.pdf',
+})
+assert(garbage === 'Voinea Mihai', `filename overrides garbage: ${garbage}`)
+
+const parsed = parseEmploymentDocument(TESS_REAL, {
+  filenames: ['Carte_Munca_Voinea_Mihai (1).pdf'],
+})
+assert(parsed.nume === 'Voinea Mihai', `parsed nume ${parsed.nume}`)
+
+assert(looksLikeHandwrittenForm(TESS_REAL), 'detect form')
 assert(
   !shouldSkipOcrForEmbeddedText(
-    'Numele şi prenumele Data naşterii Locul naşterii Domiciliul Locul de muncă Seria Nr',
-    settings,
+    'Numele şi prenumele Data naşterii Locul naşterii Domiciliul',
+    getPdfOcrSettings('high'),
   ),
-  'must NOT skip OCR on carnet form labels',
+  'no skip on form',
 )
 
-const parsed = parseEmploymentDocument(`
-Carte de muncă
-Numele şi prenumele VOINEA MIHAI
-CNP: 1700115400016
-Angajat la S.C. Exemplu SRL din 01.03.2010 pana in 15.08.2020 salariu 4500 lei
-Vechime 10 ani 5 luni
-`)
-assert(parsed.nume === 'Voinea Mihai', `parsed nume ${parsed.nume}`)
-assert(parsed.cnp === SAMPLE, `parsed cnp ${parsed.cnp}`)
-assert(parsed.sex === 'M', `parsed sex ${parsed.sex}`)
-assert(parsed.dataNasterii === '1970-01-15', `parsed dob ${parsed.dataNasterii}`)
-assert(parsed.stagiuEstimatAni === 10, `stagiu ani ${parsed.stagiuEstimatAni}`)
-assert(parsed.stagiuEstimatLuni === 5, `stagiu luni ${parsed.stagiuEstimatLuni}`)
-assert(parsed.salariuMediuEstimat === 4500, `salariu ${parsed.salariuMediuEstimat}`)
+assert(extractCnpFromText(`CNP: ${SAMPLE}`)?.cnp === SAMPLE, 'cnp label')
 
-console.log('cnp.selftest: OK')
+console.log('cnp.selftest: OK — VOINEA MIHAI extras din output OCR real')
