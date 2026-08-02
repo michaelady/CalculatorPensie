@@ -1,6 +1,7 @@
 import {
   detectDeviceTier,
   getPdfOcrSettings,
+  MAX_PDF_PAGES,
   shouldSkipOcrForEmbeddedText,
 } from './ocrSettings'
 
@@ -9,17 +10,21 @@ function assert(cond: boolean, msg: string) {
 }
 
 const low = getPdfOcrSettings('low')
-assert(low.maxPages === 8, `low maxPages ${low.maxPages}`)
+assert(low.maxPages === MAX_PDF_PAGES, `low maxPages must be ${MAX_PDF_PAGES}, got ${low.maxPages}`)
+assert(low.chunkPages < low.maxPages, `low chunkPages ${low.chunkPages}`)
+assert(low.chunkPages === 4, `low chunkPages ${low.chunkPages}`)
 assert(low.renderScale < 1.5, `low scale ${low.renderScale}`)
-assert(low.maxCanvasEdge <= 1280, `low edge ${low.maxCanvasEdge}`)
+assert(low.lowMemory === true, 'low should be lowMemory')
 assert(low.tesseractLang === 'ron', `low lang ${low.tesseractLang}`)
 
 const mid = getPdfOcrSettings('mid')
-assert(mid.maxPages === 12, `mid maxPages ${mid.maxPages}`)
+assert(mid.maxPages === MAX_PDF_PAGES, `mid maxPages ${mid.maxPages}`)
+assert(mid.chunkPages === 8, `mid chunkPages ${mid.chunkPages}`)
 assert(mid.renderScale >= 1.5 && mid.renderScale < 2, `mid scale ${mid.renderScale}`)
 
 const high = getPdfOcrSettings('high')
-assert(high.maxPages === 20, `high maxPages ${high.maxPages}`)
+assert(high.maxPages === MAX_PDF_PAGES, `high maxPages ${high.maxPages}`)
+assert(high.chunkPages === MAX_PDF_PAGES, `high chunkPages ${high.chunkPages}`)
 assert(high.renderScale >= 2, `high scale ${high.renderScale}`)
 assert(high.tesseractLang.includes('ron'), 'high includes ron')
 

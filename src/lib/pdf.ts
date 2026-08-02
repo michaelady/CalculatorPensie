@@ -109,8 +109,10 @@ async function renderPageToCanvas(
 
   // willReadFrequently ajută la exporturi repetate, dar pe low-end crește RAM —
   // pe low folosim contextul default (GPU) și un singur toBlob.
-  const lowMem = settings.maxPages <= 8
-  const ctx = canvas.getContext('2d', lowMem ? undefined : { willReadFrequently: true })
+  const ctx = canvas.getContext(
+    '2d',
+    settings.lowMemory ? undefined : { willReadFrequently: true },
+  )
   if (!ctx) throw new Error('Nu s-a putut crea contextul canvas pentru PDF')
 
   // Fundal alb — scanările transparente / dark nu derutează OCR-ul

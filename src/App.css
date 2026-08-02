@@ -425,6 +425,28 @@ a {
   font-size: 0.92rem;
 }
 
+.ocr-file-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: min(100%, 22rem);
+  text-align: left;
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.ocr-file-list li {
+  padding: 0.35rem 0.6rem;
+  background: color-mix(in srgb, var(--fog) 80%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ocr-raw {
   margin-top: 1rem;
 }

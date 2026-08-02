@@ -44,6 +44,8 @@ export interface DocumentOcrResult {
   previewUrl: string | null
   pageCount?: number
   pagesProcessed?: number
+  filesProcessed?: number
+  chunksProcessed?: number
 }
 
 export async function runOcr(
@@ -82,109 +84,125 @@ function combinePageText(embedded: string, ocrText: string): string {
   return [...new Set(parts)].join('\n')
 }
 
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+}
+
+function mapProgress(
+  local: number,
+  rangeStart: number,
+  rangeEnd: number,
+): number {
+  return rangeStart + (rangeEnd - rangeStart) * Math.min(1, Math.max(0, local))
+}
+
 /**
- * OCR pe imagine sau PDF (inclusiv PDF-uri scanate / cu poze).
- * Pentru PDF: procesează pagină cu pagină (randare → OCR → eliberare memorie),
- * cu setări adaptive pe dispozitive low-RAM / Android vechi.
+ * OCR pe un singur fișier PDF deja pregătit (chunk temporar sau PDF mic).
+ * pageOffset: offset 0-based pentru numerotarea paginilor în textul final.
  */
-export async function runOcrOnDocument(
+async function runOcrOnPdfFile(
   file: File,
+  settings: ReturnType<typeof getPdfOcrSettings>,
   onProgress?: (p: OcrProgress) => void,
+  options?: {
+    pageOffset?: number
+    totalPagesHint?: number
+    progressStart?: number
+    progressEnd?: number
+    sharedWorker?: { current: TessWorker | null }
+  },
 ): Promise<DocumentOcrResult> {
-  const isPdf =
-    file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+  const {
+    processPdfPages,
+    canvasToBlob,
+    shouldSkipOcrForEmbeddedText,
+    yieldToMain,
+  } = await import('./pdf')
 
-  if (isPdf) {
-    const {
-      processPdfPages,
-      canvasToBlob,
-      shouldSkipOcrForEmbeddedText,
-      yieldToMain,
-    } = await import('./pdf')
+  const pageOffset = options?.pageOffset ?? 0
+  const progressStart = options?.progressStart ?? 0.2
+  const progressEnd = options?.progressEnd ?? 1
+  const pageTexts: string[] = []
+  const workerRef = options?.sharedWorker ?? { current: null }
+  const ownsWorker = !options?.sharedWorker
 
-    const settings = getPdfOcrSettings()
-    const pageTexts: string[] = []
-    const workerRef: { current: TessWorker | null } = { current: null }
-
-    const ensureWorker = async (): Promise<TessWorker> => {
-      if (workerRef.current) return workerRef.current
-      onProgress?.({ status: 'Se încarcă motorul OCR…', progress: 0.28 })
-      const created = await createWorker(settings.tesseractLang, 1, {
-        logger: (m) => {
-          if (m.status && onProgress && m.status !== 'recognizing text') {
-            onProgress({
-              status: STATUS_MAP[String(m.status)] ?? String(m.status),
-              progress: typeof m.progress === 'number' ? 0.28 + m.progress * 0.05 : 0.3,
-            })
-          }
-        },
-      })
-      workerRef.current = created as unknown as TessWorker
-      return workerRef.current
-    }
-
-    try {
-      const meta = await processPdfPages(
-        file,
-        async (page) => {
-          const embedded = page.embeddedText.trim()
-          const n = page.pagesToProcess
-          const idx = page.pageNumber - 1
-
-          onProgress?.({
-            status: `OCR pagină ${page.pageNumber} din ${n}…`,
-            progress: 0.3 + (0.65 * idx) / n,
+  const ensureWorker = async (): Promise<TessWorker> => {
+    if (workerRef.current) return workerRef.current
+    onProgress?.({
+      status: 'Se încarcă motorul OCR…',
+      progress: mapProgress(0.05, progressStart, progressEnd),
+    })
+    const created = await createWorker(settings.tesseractLang, 1, {
+      logger: (m) => {
+        if (m.status && onProgress && m.status !== 'recognizing text') {
+          onProgress({
+            status: STATUS_MAP[String(m.status)] ?? String(m.status),
+            progress: mapProgress(
+              typeof m.progress === 'number' ? 0.05 + m.progress * 0.05 : 0.08,
+              progressStart,
+              progressEnd,
+            ),
           })
+        }
+      },
+    })
+    workerRef.current = created as unknown as TessWorker
+    return workerRef.current
+  }
 
-          let ocrText = ''
-          const skipOcr =
-            !page.canvas || shouldSkipOcrForEmbeddedText(embedded, page.settings)
+  try {
+    const meta = await processPdfPages(
+      file,
+      async (page) => {
+        const embedded = page.embeddedText.trim()
+        const n = options?.totalPagesHint ?? page.pagesToProcess
+        const absolutePage = pageOffset + page.pageNumber
+        const idx = absolutePage - 1
 
-          if (!skipOcr && page.canvas) {
-            const w = await ensureWorker()
-            // JPEG e mult mai ușor în memorie decât PNG pe telefoane vechi
-            const blob = await canvasToBlob(
-              page.canvas,
-              page.settings.jpegQuality,
-              'image/jpeg',
-            )
-            const { data } = await w.recognize(blob)
-            ocrText = (data.text ?? '').trim()
-          }
+        onProgress?.({
+          status: `OCR pagină ${absolutePage}${n ? ` din ${n}` : ''}…`,
+          progress: mapProgress(0.1 + (0.85 * idx) / Math.max(1, n), progressStart, progressEnd),
+        })
 
-          const combined = combinePageText(embedded, ocrText)
-          if (combined.trim()) {
-            pageTexts.push(`--- Pagina ${page.pageNumber} ---\n${combined.trim()}`)
-          }
+        let ocrText = ''
+        const skipOcr =
+          !page.canvas || shouldSkipOcrForEmbeddedText(embedded, page.settings)
 
-          await yieldToMain()
-        },
-        (status, progress) => {
-          onProgress?.({ status, progress })
-        },
-        settings,
-      )
+        if (!skipOcr && page.canvas) {
+          const w = await ensureWorker()
+          const blob = await canvasToBlob(
+            page.canvas,
+            page.settings.jpegQuality,
+            'image/jpeg',
+          )
+          const { data } = await w.recognize(blob)
+          ocrText = (data.text ?? '').trim()
+        }
 
-      onProgress?.({ status: 'Gata', progress: 1 })
+        const combined = combinePageText(embedded, ocrText)
+        if (combined.trim()) {
+          pageTexts.push(`--- Pagina ${absolutePage} ---\n${combined.trim()}`)
+        }
 
-      if (pageTexts.length === 0) {
-        throw new Error(
-          'Nu am putut citi text din PDF. Încearcă un scan mai clar sau o fotografie a paginii.',
-        )
-      }
+        await yieldToMain()
+      },
+      (status, progress) => {
+        onProgress?.({
+          status,
+          progress: mapProgress(progress * 0.1, progressStart, progressEnd),
+        })
+      },
+      settings,
+    )
 
-      let note = ''
-      if (meta.pageCount > meta.pagesProcessed) {
-        note = `\n\n[Notă: au fost procesate ${meta.pagesProcessed} din ${meta.pageCount} pagini (mod economie memorie)]`
-      }
-
-      return {
-        text: pageTexts.join('\n\n') + note,
-        previewUrl: meta.previewUrl,
-        pageCount: meta.pageCount,
-        pagesProcessed: meta.pagesProcessed,
-      }
-    } finally {
+    return {
+      text: pageTexts.join('\n\n'),
+      previewUrl: meta.previewUrl,
+      pageCount: meta.pageCount,
+      pagesProcessed: meta.pagesProcessed,
+    }
+  } finally {
+    if (ownsWorker) {
       const activeWorker = workerRef.current
       workerRef.current = null
       if (activeWorker) {
@@ -196,12 +214,194 @@ export async function runOcrOnDocument(
       }
     }
   }
+}
+
+/**
+ * PDF: împarte în chunk-uri temporare pe dispozitiv (OPFS/IDB), apoi OCR pe rând.
+ * Imagini: OCR direct.
+ */
+export async function runOcrOnDocument(
+  file: File,
+  onProgress?: (p: OcrProgress) => void,
+): Promise<DocumentOcrResult> {
+  if (isPdfFile(file)) {
+    const settings = getPdfOcrSettings()
+    const { splitPdfToTempChunks } = await import('./pdfSplit')
+    const { readTempFile, deleteTempFile, clearTempSession } = await import('./tempStorage')
+
+    const split = await splitPdfToTempChunks(file, settings, (status, progress) => {
+      onProgress?.({ status, progress: progress * 0.15 })
+    })
+
+    const pageTexts: string[] = []
+    let previewUrl: string | null = null
+    let pagesProcessed = 0
+    const workerRef: { current: TessWorker | null } = { current: null }
+
+    try {
+      const nChunks = split.chunks.length
+      for (let i = 0; i < nChunks; i++) {
+        const chunk = split.chunks[i]
+        const rangeStart = 0.15 + (0.8 * i) / nChunks
+        const rangeEnd = 0.15 + (0.8 * (i + 1)) / nChunks
+
+        onProgress?.({
+          status:
+            nChunks > 1
+              ? `Se procesează partea ${i + 1}/${nChunks} (pag. ${chunk.startPage}–${chunk.endPage})…`
+              : 'Se citește PDF-ul…',
+          progress: rangeStart,
+        })
+
+        const chunkFile = await readTempFile(chunk.handle)
+        try {
+          const part = await runOcrOnPdfFile(chunkFile, settings, onProgress, {
+            pageOffset: chunk.startPage - 1,
+            totalPagesHint: split.pagesQueued,
+            progressStart: rangeStart,
+            progressEnd: rangeEnd,
+            sharedWorker: workerRef,
+          })
+          if (part.text.trim()) pageTexts.push(part.text.trim())
+          if (!previewUrl && part.previewUrl) previewUrl = part.previewUrl
+          pagesProcessed += part.pagesProcessed ?? chunk.pageCount
+        } finally {
+          await deleteTempFile(chunk.handle)
+        }
+      }
+    } finally {
+      const activeWorker = workerRef.current
+      workerRef.current = null
+      if (activeWorker) {
+        try {
+          await activeWorker.terminate()
+        } catch {
+          /* ignore */
+        }
+      }
+      await clearTempSession(split.sessionId)
+    }
+
+    onProgress?.({ status: 'Gata', progress: 1 })
+
+    if (pageTexts.length === 0) {
+      throw new Error(
+        'Nu am putut citi text din PDF. Încearcă un scan mai clar sau o fotografie a paginii.',
+      )
+    }
+
+    let note = ''
+    if (split.pageCount > split.pagesQueued) {
+      note = `\n\n[Notă: au fost procesate ${split.pagesQueued} din ${split.pageCount} pagini (limită ${settings.maxPages})]`
+    } else if (split.split) {
+      note = `\n\n[Notă: PDF împărțit în ${split.chunks.length} fișiere temporare × max. ${settings.chunkPages} pagini]`
+    }
+
+    return {
+      text: pageTexts.join('\n\n') + note,
+      previewUrl,
+      pageCount: split.pageCount,
+      pagesProcessed,
+      chunksProcessed: split.chunks.length,
+    }
+  }
 
   // Imagine clasică — pe low-end folosim doar română ca să reducem modelul
   const lang = getPdfOcrSettings().tesseractLang
   const text = await runOcrWithLang(file, lang, onProgress)
   const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : null
-  return { text, previewUrl }
+  return { text, previewUrl, filesProcessed: 1 }
+}
+
+/**
+ * OCR pe mai multe fișiere (ex. scan carte de muncă + extras Revisal).
+ * Procesează pe rând și unește textul pentru completarea perioadei lucrate.
+ */
+export async function runOcrOnDocuments(
+  files: File[],
+  onProgress?: (p: OcrProgress) => void,
+): Promise<DocumentOcrResult> {
+  if (files.length === 0) {
+    throw new Error('Nu ai selectat niciun fișier')
+  }
+  if (files.length === 1) {
+    return runOcrOnDocument(files[0], onProgress)
+  }
+
+  const texts: string[] = []
+  let previewUrl: string | null = null
+  let pageCount = 0
+  let pagesProcessed = 0
+  let chunksProcessed = 0
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]
+    const rangeStart = i / files.length
+    const rangeEnd = (i + 1) / files.length
+
+    onProgress?.({
+      status: `Fișier ${i + 1}/${files.length}: ${file.name}`,
+      progress: rangeStart,
+    })
+
+    const result = await runOcrOnDocument(file, (p) => {
+      onProgress?.({
+        status: `Fișier ${i + 1}/${files.length}: ${p.status}`,
+        progress: mapProgress(p.progress, rangeStart, rangeEnd),
+      })
+    })
+
+    if (result.text.trim()) {
+      texts.push(`===== Sursă ${i + 1}: ${file.name} =====\n${result.text.trim()}`)
+    }
+    if (!previewUrl && result.previewUrl) previewUrl = result.previewUrl
+    pageCount += result.pageCount ?? (isPdfFile(file) ? 0 : 1)
+    pagesProcessed += result.pagesProcessed ?? (isPdfFile(file) ? 0 : 1)
+    chunksProcessed += result.chunksProcessed ?? 0
+  }
+
+  onProgress?.({ status: 'Gata', progress: 1 })
+
+  if (texts.length === 0) {
+    throw new Error('Nu am putut citi text din fișierele selectate.')
+  }
+
+  return {
+    text: texts.join('\n\n'),
+    previewUrl,
+    pageCount: pageCount || undefined,
+    pagesProcessed: pagesProcessed || undefined,
+    filesProcessed: files.length,
+    chunksProcessed: chunksProcessed || undefined,
+  }
+}
+
+/**
+ * Unește extragerile din mai multe surse (scan + Revisal etc.)
+ * și recalculează stagiul pe baza perioadelor combinate.
+ */
+export function mergeOcrExtractions(parts: OcrExtraction[]): OcrExtraction {
+  if (parts.length === 0) {
+    return {
+      text: '',
+      angajari: [],
+      stagiuEstimatAni: 0,
+      stagiuEstimatLuni: 0,
+      salariuMediuEstimat: null,
+      indiciiGasiti: [],
+      avertismente: ['Nicio extragere de unit.'],
+    }
+  }
+  if (parts.length === 1) return parts[0]
+
+  // Re-parse pe textul combinat — evită dublarea logică de stagiu
+  const combinedText = parts.map((p) => p.text).join('\n\n')
+  const merged = parseEmploymentDocument(combinedText)
+  merged.indiciiGasiti = [
+    `Surse combinate: ${parts.length} fișiere`,
+    ...merged.indiciiGasiti,
+  ]
+  return merged
 }
 
 async function runOcrWithLang(
@@ -343,6 +543,13 @@ export function parseEmploymentDocument(text: string): OcrExtraction {
   }
   if (lower.includes('casă de pensii') || lower.includes('cnpp') || lower.includes('stagiu')) {
     indiciiGasiti.push('Document identificat: extras / stagiu CNPP')
+  }
+  if (
+    lower.includes('revisal') ||
+    lower.includes('registrul general de evidență a salariaților') ||
+    lower.includes('registrul general de evidenta a salariatilor')
+  ) {
+    indiciiGasiti.push('Document identificat: extras Revisal')
   }
 
   for (const line of lines) {

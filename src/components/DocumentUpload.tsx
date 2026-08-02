@@ -1,13 +1,21 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { parseEmploymentDocument, runOcrOnDocument, type OcrExtraction } from '../lib/ocr'
-import { getPdfOcrSettings } from '../lib/ocrSettings'
+import {
+  parseEmploymentDocument,
+  runOcrOnDocuments,
+  type OcrExtraction,
+} from '../lib/ocr'
+import { getPdfOcrSettings, MAX_PDF_PAGES } from '../lib/ocrSettings'
 
 interface DocumentUploadProps {
   onExtracted: (data: OcrExtraction) => void
 }
 
-function looksLikePdf(file: File): boolean {
-  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+function isSupportedFile(file: File): boolean {
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+  const isImage =
+    file.type.startsWith('image/') ||
+    /\.(jpe?g|png|webp|tif{1,2}|gif|bmp)$/i.test(file.name)
+  return isPdf || isImage
 }
 
 export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
@@ -19,34 +27,34 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
   const [error, setError] = useState<string | null>(null)
   const [lastText, setLastText] = useState<string | null>(null)
   const [pdfInfo, setPdfInfo] = useState<string | null>(null)
-  const maxPdfPagesHint = useMemo(() => getPdfOcrSettings().maxPages, [])
+  const [selectedNames, setSelectedNames] = useState<string[]>([])
+  const settings = useMemo(() => getPdfOcrSettings(), [])
 
-  const processFile = useCallback(
-    async (file: File) => {
+  const processFiles = useCallback(
+    async (fileList: FileList | File[] | null) => {
+      const files = [...(fileList ?? [])].filter(isSupportedFile)
+      if (files.length === 0) {
+        setError('Format nesuportat. Folosește JPG, PNG, WEBP sau PDF.')
+        return
+      }
+
       setError(null)
       setBusy(true)
       setProgress(0)
       setStatus('Pregătire…')
       setLastText(null)
       setPdfInfo(null)
+      setSelectedNames(files.map((f) => f.name))
 
-      const isPdf = looksLikePdf(file)
-      const isImage = file.type.startsWith('image/')
-
-      if (!isPdf && !isImage && !/\.(jpe?g|png|webp|tif{1,2}|gif|bmp)$/i.test(file.name)) {
-        setError('Format nesuportat. Folosește JPG, PNG, WEBP sau PDF.')
-        setBusy(false)
-        return
-      }
-
-      if (isImage) {
-        setPreview(URL.createObjectURL(file))
+      const firstImage = files.find((f) => f.type.startsWith('image/'))
+      if (firstImage) {
+        setPreview(URL.createObjectURL(firstImage))
       } else {
         setPreview(null)
       }
 
       try {
-        const result = await runOcrOnDocument(file, (p) => {
+        const result = await runOcrOnDocuments(files, (p) => {
           setStatus(p.status)
           setProgress(Math.round(Math.min(100, Math.max(0, p.progress * 100))))
         })
@@ -55,17 +63,33 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
           setPreview(result.previewUrl)
         }
 
+        const infoParts: string[] = []
+        if (files.length > 1) {
+          infoParts.push(`${files.length} fișiere combinate`)
+        }
         if (result.pageCount != null) {
           const processed = result.pagesProcessed ?? result.pageCount
-          setPdfInfo(
+          infoParts.push(
             processed < result.pageCount
-              ? `PDF: ${processed} din ${result.pageCount} pagini procesate (limită ${maxPdfPagesHint} pe acest dispozitiv)`
-              : `PDF: ${result.pageCount} ${result.pageCount === 1 ? 'pagină' : 'pagini'} procesate`,
+              ? `${processed}/${result.pageCount} pagini PDF (limită ${MAX_PDF_PAGES})`
+              : `${result.pageCount} ${result.pageCount === 1 ? 'pagină' : 'pagini'} PDF`,
           )
         }
+        if (result.chunksProcessed && result.chunksProcessed > 1) {
+          infoParts.push(
+            `împărțit în ${result.chunksProcessed} fișiere temporare (×${settings.chunkPages} pag.)`,
+          )
+        }
+        setPdfInfo(infoParts.length > 0 ? infoParts.join(' · ') : null)
 
         setLastText(result.text)
         const extracted = parseEmploymentDocument(result.text)
+        if (files.length > 1) {
+          extracted.indiciiGasiti = [
+            `Surse combinate: ${files.length} fișiere (scan / Revisal / altele)`,
+            ...extracted.indiciiGasiti,
+          ]
+        }
         onExtracted(extracted)
         setStatus('Gata')
         setProgress(100)
@@ -78,24 +102,21 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
         )
       } finally {
         setBusy(false)
+        if (inputRef.current) inputRef.current.value = ''
       }
     },
-    [maxPdfPagesHint, onExtracted],
+    [onExtracted, settings.chunkPages],
   )
-
-  const onFiles = (files: FileList | null) => {
-    const file = files?.[0]
-    if (file) void processFile(file)
-  }
 
   return (
     <section className="panel ocr-panel" aria-labelledby="ocr-title">
       <div className="panel-head">
         <h2 id="ocr-title">Încarcă documente (OCR)</h2>
         <p>
-          Fotografii, scanări sau PDF-uri (inclusiv PDF cu poze) ale cărții de muncă,
-          adeverințelor de vechime sau extraselor CNPP. Datele extrase completează formularul —
-          verifică-le înainte de calcul.
+          Poți selecta mai multe fișiere — de exemplu scanul cărții de muncă (poze / scris de
+          mână) și extrasul digital din Revisal — ca să completeze împreună perioada lucrată.
+          PDF-urile lungi se împart automat în fișiere temporare pe telefon și se procesează pe
+          rând (până la {MAX_PDF_PAGES} pagini).
         </p>
       </div>
 
@@ -107,16 +128,16 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
         }}
         onDrop={(e) => {
           e.preventDefault()
-          onFiles(e.dataTransfer.files)
+          void processFiles(e.dataTransfer.files)
         }}
       >
         <input
           ref={inputRef}
           type="file"
           accept="image/*,.jpg,.jpeg,.png,.webp,.tif,.tiff,.pdf,application/pdf"
-          capture="environment"
+          multiple
           hidden
-          onChange={(e) => onFiles(e.target.files)}
+          onChange={(e) => void processFiles(e.target.files)}
         />
 
         {preview ? (
@@ -127,11 +148,20 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
           </div>
         )}
 
-        <p className="dropzone-title">Trage fișierul aici sau alege din dispozitiv</p>
+        <p className="dropzone-title">Trage fișierele aici sau alege din dispozitiv</p>
         <p className="dropzone-meta">
-          JPG, PNG, WEBP, PDF (text sau scanat cu poze) — max. {maxPdfPagesHint} pagini
-          OCR pe acest dispozitiv
+          JPG, PNG, WEBP, PDF (text, scan sau Revisal) — mai multe surse odată · max.{' '}
+          {MAX_PDF_PAGES} pagini/PDF · pe dispozitiv slab: chunk-uri de {settings.chunkPages}{' '}
+          pagini
         </p>
+
+        {selectedNames.length > 0 && !busy ? (
+          <ul className="ocr-file-list">
+            {selectedNames.map((name) => (
+              <li key={name}>{name}</li>
+            ))}
+          </ul>
+        ) : null}
 
         <div className="dropzone-actions">
           <button
@@ -140,7 +170,7 @@ export function DocumentUpload({ onExtracted }: DocumentUploadProps) {
             disabled={busy}
             onClick={() => inputRef.current?.click()}
           >
-            {busy ? 'Se scanează…' : 'Alege imagine sau PDF'}
+            {busy ? 'Se scanează…' : 'Alege imagini sau PDF-uri'}
           </button>
         </div>
 
